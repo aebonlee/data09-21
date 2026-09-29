@@ -149,7 +149,9 @@
             a.g.reservedBy ? h('span', { class: 'muted' }, ' · 예약: ' + nameOf(a.g.reservedBy)) : null);
         })),
         alerts.length > 5 ? h('p', { class: 'muted' }, '외 ' + (alerts.length - 5) + '건') : null,
-        h('p', { class: 'hint' }, '가족 누구나 보관함을 열면 이 알림을 봅니다. 알림 시점: ' + L.alertDaysText(settings.alertDays) + ' — 「설정」에서 바꿉니다. 가족 전체에게 카카오톡·문자로 보내는 것은 2단계입니다.'));
+        h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn small primary send-all',
+          onclick: function () { openSend(alerts.map(function (a) { return a.g; })); } }, '오늘의 알림 모두 가족에게 보내기')),
+        h('p', { class: 'hint' }, '가족 누구나 보관함을 열면 이 알림을 봅니다. 알림 시점: ' + L.alertDaysText(settings.alertDays) + ' — 「설정」에서 바꿉니다. 「가족에게 보내기」는 휴대폰의 카카오톡·문자로 무료로 보내지만, 보내기 버튼은 직접 눌러야 합니다(자동 발송은 2단계).'));
     }
 
     var list = L.filterList(items, tab, today);
@@ -187,6 +189,8 @@
     var meta = [g.brand || '발행처 미입력', L.shortDate(g.expiresOn) + '까지'].join(' · ');
     var spendBtn = g.isAmount && !g.used
       ? h('button', { type: 'button', class: 'btn small', onclick: function () { spendGiftcon(g); } }, '금액 사용') : null;
+    var inAlert = !g.used && L.alertsFor([g], settings.alertDays, today).length > 0;
+    var sendBtn = inAlert ? h('button', { type: 'button', class: 'btn small send-one', onclick: function () { openSend([g]); } }, '가족에게 보내기') : null;
     var usedLine = g.used ? '사용: ' + nameOf(g.usedBy) + (g.usedAt ? ' · ' + L.fmtDateTime(g.usedAt) : '') : null;
     return h('article', { class: 'card st-' + st, 'data-id': g.id },
       h('div', { class: 'card-top' },
@@ -204,6 +208,7 @@
       h('div', { class: 'card-actions' },
         h('label', { class: 'used-toggle' }, usedBox, h('span', null, '사용함')),
         spendBtn,
+        sendBtn,
         resv,
         h('a', { class: 'btn small', href: '#/edit/' + encodeURIComponent(g.id) }, '고치기'),
         h('button', { type: 'button', class: 'btn small danger', onclick: function () { removeGiftcon(g); } }, '삭제')));
@@ -226,13 +231,51 @@
     store.deleteGiftcon(g.id).then(function () { toast('지웠습니다.'); return reload(); }).catch(fail);
   }
 
+  // 가족에게 보내기 — 휴대폰 공유 창(카카오톡·문자 등 고르기) 또는 문자 앱. 무료, 보내기는 사람이 누름.
+  function openSend(list) {
+    var text = L.shareText(list, today, nameOf);
+    var d = document.getElementById('dialog');
+    document.getElementById('dialogTitle').textContent = '가족에게 보내기' + (list.length > 1 ? ' (' + list.length + '건)' : '');
+    var c = document.getElementById('dialogContent');
+    c.innerHTML = '';
+    var box = h('textarea', { class: 'send-text', rows: String(Math.min(10, list.length + 3)), 'aria-label': '보낼 글' }, text);
+    var phones = (fam ? fam.members : []).map(function (m) { return (settings.phones || {})[m.userId]; }).filter(Boolean);
+    phones = phones.filter(function (p, i) { return phones.indexOf(p) === i; });
+    var platform = L.detectPlatform(navigator.userAgent, navigator.maxTouchPoints || 0);
+    var sms = h('a', { class: 'btn', href: L.smsHref(phones, text, platform) }, phones.length ? '문자로 보내기 (' + phones.length + '명)' : '문자 앱 열기');
+    box.addEventListener('input', function () { sms.href = L.smsHref(phones, box.value, platform); });
+    var canShare = typeof navigator.share === 'function';
+    var shareBtn = canShare ? h('button', { type: 'button', class: 'btn primary', onclick: function () {
+      navigator.share({ title: '가족 기프티콘', text: box.value }).then(function () { d.close(); }, function (e) {
+        if (e && e.name === 'AbortError') return;
+        toast('공유 창을 열지 못했습니다. 「글 복사」 뒤 카카오톡에 붙여 넣어 주세요.', true);
+      });
+    } }, '카카오톡 등으로 공유') : null;
+    var copyBtn = h('button', { type: 'button', class: 'btn', onclick: function () {
+      var ok = function () { toast('글을 복사했습니다. 카카오톡 가족 대화방에 붙여 넣어 주세요.'); };
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(box.value).then(ok, function () { box.select(); });
+      else { box.select(); try { document.execCommand('copy'); ok(); } catch (e) { /* 직접 복사 */ } }
+    } }, '글 복사');
+    add(c, [
+      h('p', { class: 'hint' }, '휴대폰에 있는 카카오톡·문자로 보내므로 추가 비용이 없습니다. 다만 받는 사람을 고르고 「보내기」를 누르는 것은 직접 해야 합니다(정해진 시각에 저절로 보내는 것은 유료 발송 서비스와 서버가 필요한 2단계).'),
+      box,
+      h('div', { class: 'row send-row' }, shareBtn, sms, copyBtn),
+      h('p', { class: 'hint' }, (canShare ? '「카카오톡 등으로 공유」를 누르면 휴대폰 공유 창이 열립니다. 카카오톡 → 가족 대화방을 고르세요. ' : '이 브라우저에는 공유 창이 없습니다(PC 등). 「글 복사」 뒤 붙여 넣어 주세요. ') +
+        (phones.length ? '「문자로 보내기」는 「가족」 화면에 넣은 번호로 문자 앱을 엽니다.' : '문자 받을 번호는 「가족」 화면에서 넣을 수 있습니다(선택, 이 기기에만 저장).'))
+    ]);
+    var a = document.getElementById('dialogActions');
+    a.innerHTML = '';
+    a.appendChild(h('button', { class: 'btn', value: 'close' }, '닫기'));
+    d.showModal();
+  }
+
   // ════════════════════════════════════════════════════════
   // 등록 · 고치기
   // ════════════════════════════════════════════════════════
   function viewForm(id) {
     var g = id ? items.filter(function (x) { return x.id === id; })[0] : null;
     if (id && !g) return [h('h1', null, '기프티콘 고치기'), h('p', { class: 'empty' }, '이 기프티콘을 찾지 못했습니다. 이미 지워졌을 수 있습니다.'), h('a', { class: 'btn', href: '#/' }, '보관함으로')];
-    var blob = null;
+    var blob = null, original = null;
     var preview = h('div', { class: 'preview' }, h('span', { class: 'muted' }, '사진을 고르면 여기에 보입니다. 사진을 보면서 옆 칸을 채워 주세요.'));
     if (g && g.imagePath) store.imageUrl(g).then(function (u) { if (u) { preview.innerHTML = ''; preview.appendChild(h('img', { src: u, alt: '지금 사진' })); } });
     var file = h('input', { type: 'file', name: 'photo', accept: 'image/*' });
@@ -241,6 +284,7 @@
       var err = L.validateImageFile(f);
       if (err) { toast(err, true); file.value = ''; return; }
       if (!f) return;
+      original = f;
       shrinkImage(f, store.mode === 'demo' ? 900 : L.IMAGE_MAX_SIDE).then(function (b) {
         blob = b;
         preview.innerHTML = '';
@@ -267,7 +311,7 @@
     var saveBtn = h('button', { type: 'submit', class: 'btn primary' }, g ? '고친 내용 저장' : '등록');
     var form = h('form', { class: 'panel gform', novalidate: true },
       h('div', { class: 'gform-photo' }, preview, field('사진 (기프티콘 캡처)', file, '긴 변 ' + (store.mode === 'demo' ? 900 : L.IMAGE_MAX_SIDE) + 'px 로 줄여 저장합니다.'),
-        readHelper(function () { return blob; }, function (v) {
+        readHelper(function () { return blob; }, function () { return original || blob; }, function (v) {
           if (v.title) title.value = v.title;
           if (v.brand) brand.value = v.brand;
           if (v.expiresOn) exp.value = v.expiresOn;
@@ -297,13 +341,13 @@
       }).catch(function (e) { saveBtn.disabled = false; fail(e); });
     });
     return [h('h1', null, g ? '기프티콘 고치기' : '기프티콘 등록'),
-      h('p', { class: 'lead' }, '사진은 확인용으로 보관합니다. 상품명과 유효기간은 사진을 보며 적어 주세요. 사진 아래 「사진에서 채우기」로 AI 에게 읽게 할 수도 있습니다(선택).'),
+      h('p', { class: 'lead' }, '사진은 확인용으로 보관합니다. 상품명과 유효기간은 사진을 보며 적어 주세요. 사진 아래 「사진에서 채우기」로 무료 글자 읽기를 쓸 수도 있습니다(선택).'),
       form];
   }
 
-  // 사진에서 채우기 (선택, 기본 접힘) — 반자동(ChatGPT·Copilot) + 내 OpenAI 키로 바로 읽기
-  // getBlob(): 지금 고른 사진(줄인 JPEG) · fill(v): 읽은 값으로 칸 채우기(저장은 사람이)
-  function readHelper(getBlob, fill) {
+  // 사진에서 채우기 (선택, 기본 접힘) — ① 무료 글자 읽기(이 기기 안 OCR) ② 무료 AI 채팅 반자동 ③ 내 OpenAI 키
+  // getBlob(): 지금 고른 사진(줄인 JPEG) · getOriginal(): 고른 원본(OCR 용, 저장 안 함) · fill(v): 칸 채우기(저장은 사람이)
+  function readHelper(getBlob, getOriginal, fill) {
     var msg = h('div', { class: 'read-msg', role: 'status' });
     function say(lines, isErr) {
       msg.innerHTML = '';
@@ -315,9 +359,35 @@
       fill(r.value);
       say(['칸을 채웠습니다. 사진과 맞는지 확인한 뒤 「등록」을 눌러 주세요.'].concat(r.warnings));
     }
+
+    // ① 무료 글자 읽기 — 엔진(약 8MB)은 누를 때 처음 받습니다. 사진은 이 기기 밖으로 나가지 않습니다.
+    var ocrMsg = h('div', { class: 'read-msg ocr-msg', role: 'status' });
+    var ocrRaw = h('details', { class: 'ocr-raw', hidden: true }, h('summary', null, '읽은 글자 보기 (긴 숫자는 가림)'), h('pre', null, ''));
+    var ocrBtn = h('button', { type: 'button', class: 'btn small primary ocr-btn' }, '사진 글자 읽기 (무료)');
+    ocrBtn.addEventListener('click', function () {
+      var img = getOriginal();
+      ocrMsg.innerHTML = '';
+      if (!img) { ocrMsg.appendChild(h('p', { class: 'error-text' }, '먼저 위에서 사진을 골라 주세요.')); return; }
+      ocrBtn.disabled = true;
+      var line = h('p', { class: 'hint' }, '준비 중…');
+      ocrMsg.appendChild(line);
+      window.GCOCR.readText(img, function (t) { line.textContent = t; }).then(function (res) {
+        ocrRaw.hidden = false;
+        ocrRaw.querySelector('pre').textContent = L.maskLongDigits(res.text);
+        var r = L.parseOcrText(res, today);
+        ocrMsg.innerHTML = '';
+        if (!r.ok) { r.errors.forEach(function (m) { ocrMsg.appendChild(h('p', { class: 'error-text' }, m)); }); return; }
+        fill(r.value);
+        ['칸을 채웠습니다. 글자 읽기는 틀릴 수 있으니 사진과 한 칸씩 맞춰 본 뒤 「등록」을 눌러 주세요.'].concat(r.warnings)
+          .forEach(function (m) { ocrMsg.appendChild(h('p', { class: 'hint' }, m)); });
+      }, function (e) {
+        ocrMsg.innerHTML = '';
+        ocrMsg.appendChild(h('p', { class: 'error-text' }, e.message));
+      }).then(function () { ocrBtn.disabled = false; });
+    });
     var copyBtn = h('button', { type: 'button', class: 'btn small' }, '요청문 복사');
     copyBtn.addEventListener('click', function () {
-      var done = function () { toast('요청문을 복사했습니다. ChatGPT·Copilot 에 사진과 함께 붙여 넣어 주세요.'); };
+      var done = function () { toast('요청문을 복사했습니다. Copilot·Gemini·ChatGPT 에 사진과 함께 붙여 넣어 주세요.'); };
       if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(L.READ_PROMPT).then(done, function () { promptBox.select(); });
       else { promptBox.select(); try { document.execCommand('copy'); done(); } catch (e) { /* 직접 복사 */ } }
     });
@@ -352,17 +422,22 @@
 
     return h('details', { class: 'read-helper' },
       h('summary', null, '사진에서 채우기 (선택)'),
-      h('p', { class: 'hint' }, '사진을 AI 에게 보여 주고 상품명·발행처·유효기간(금액형이면 금액)을 받아 칸을 채웁니다. 사진에 바코드가 있으면 함께 전달되니, 걱정되면 바코드를 가린 캡처를 쓰세요. 채운 뒤에는 꼭 사진과 대조해 주세요.'),
-      h('h3', null, '방법 1 — ChatGPT·Copilot 에 붙여 넣기'),
+      h('p', { class: 'hint' }, '사진에서 상품명·발행처·유효기간(금액형이면 금액)을 읽어 칸을 채웁니다. 어느 방법이든 채운 뒤에는 꼭 사진과 대조해 주세요. 바코드·쿠폰 번호는 읽지도 저장하지도 않습니다.'),
+      h('h3', null, '방법 1 — 무료 글자 읽기 (이 기기 안에서, 키 필요 없음)'),
+      h('p', { class: 'hint' }, '사진을 어디에도 보내지 않고 이 휴대폰·PC 안에서 글자를 읽습니다. 처음 누를 때 글자 읽기 엔진과 한국어 데이터(약 8MB)를 한 번 받으니 와이파이에서 해 주세요. 인쇄체는 잘 읽지만 작은 글씨·장식 글꼴은 틀리기 쉽습니다. 파일로 연 화면(file://)에서는 브라우저가 막으니 Pages 주소에서 써 주세요.'),
+      h('div', { class: 'row' }, ocrBtn),
+      ocrMsg,
+      ocrRaw,
+      h('h3', null, '방법 2 — 무료 AI 채팅에 붙여 넣기 (Copilot·Gemini·ChatGPT 무료판)'),
       h('ol', { class: 'steps' },
         h('li', null, '「요청문 복사」를 누릅니다.'),
-        h('li', null, 'ChatGPT 나 Copilot 에 기프티콘 사진을 올리고 요청문을 붙여 넣습니다.'),
+        h('li', null, 'Copilot·Gemini·ChatGPT(무료로 로그인해도 됨)에 기프티콘 사진을 올리고 요청문을 붙여 넣습니다. 사진에 바코드가 있으면 그 서비스로 함께 가니, 걱정되면 바코드를 가린 캡처를 쓰세요.'),
         h('li', null, '받은 답(JSON)을 아래 칸에 그대로 붙여 넣고 「답으로 칸 채우기」를 누릅니다.')),
       h('div', { class: 'row' }, copyBtn),
       promptBox,
       field('AI 답 붙여 넣기', answer),
       h('div', { class: 'row' }, applyBtn),
-      h('h3', null, '방법 2 — 내 OpenAI 키로 바로 읽기'),
+      h('h3', null, '방법 3 — 내 OpenAI 키로 바로 읽기 (선택, 유료 키가 있을 때만)'),
       h('p', { class: 'hint' }, '본인 OpenAI API 키가 있으면 위에서 고른 사진을 이 브라우저에서 바로 보냅니다(건당 몇 원 수준, 본인 계정에 청구). 키는 이 브라우저에만 저장되고 가족·서버와 나누지 않습니다.'),
       field('OpenAI API 키', keyIn),
       h('div', { class: 'row' }, autoBtn, forget),
@@ -420,8 +495,37 @@
           return h('li', null, m.displayName, m.role === 'owner' ? h('span', { class: 'tag' }, '만든 사람') : null, m.userId === fam.me ? h('span', { class: 'tag me' }, '나') : null);
         }))),
       who,
+      phonePanel(),
       h('section', { class: 'panel' }, h('h2', null, '내 표시 이름'), nameForm)
     ];
+  }
+
+  // 문자 받을 번호 (선택) — 「가족에게 보내기 → 문자로 보내기」에 받는 사람으로 미리 들어갑니다.
+  // 번호는 가족 DB 에 올리지 않고 이 기기에만 저장합니다(DB 칸을 늘리지 않음 · 보내는 사람의 휴대폰에만 있으면 됨).
+  function phonePanel() {
+    var inputs = fam.members.map(function (m) {
+      return { m: m, el: h('input', { type: 'tel', inputmode: 'tel', name: 'phone-' + m.userId, placeholder: '예) 010-1234-5678', autocomplete: 'off',
+        value: (settings.phones || {})[m.userId] || '' }) };
+    });
+    var form = h('form', { class: 'panel phone-form' },
+      h('h2', null, '문자 받을 번호 (선택)'),
+      h('p', { class: 'hint' }, '「가족에게 보내기 → 문자로 보내기」를 누르면 이 번호들이 받는 사람으로 들어간 문자 앱이 열립니다. 번호는 이 기기에만 저장되고 가족 DB·서버로 가지 않습니다. 카카오톡으로만 보낼 거면 비워 두셔도 됩니다.'),
+      inputs.map(function (x) { return field(x.m.displayName + (x.m.userId === fam.me ? ' (나)' : ''), x.el); }),
+      h('div', { class: 'row' }, h('button', { type: 'submit', class: 'btn primary' }, '번호 저장')));
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var next = {}, bad = [];
+      inputs.forEach(function (x) {
+        var v = x.el.value.trim();
+        if (!v) return;
+        var n = L.normPhone(v);
+        if (n) next[x.m.userId] = n; else bad.push(x.m.displayName);
+      });
+      if (bad.length) { toast(bad.join(', ') + ' 번호를 확인해 주세요(예: 010-1234-5678).', true); return; }
+      settings.phones = next; saveSettings();
+      toast('번호를 이 기기에 저장했습니다(' + Object.keys(next).length + '명).');
+    });
+    return form;
   }
 
   // ════════════════════════════════════════════════════════

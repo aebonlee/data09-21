@@ -412,6 +412,162 @@
     return null;
   }
 
+  // ── 무료 글자 읽기(OCR) 결과 → 칸 (2026-09-29 저녁) ──────────
+  // Tesseract.js 가 이 휴대폰 안에서 읽은 글자를 규칙으로 나눕니다. 바코드·쿠폰 번호는 읽지 않습니다:
+  // 숫자가 10자리 이상 이어진 줄·「바코드/쿠폰번호/주문번호」 줄은 통째로 버리고 어디에도 두지 않습니다.
+  var OCR_SKIP = /바코드|쿠폰\s*번호|주문\s*번호|교환\s*번호|인증\s*번호|PIN|핀\s*번호/i;
+  var OCR_EXP_KEY = /유효\s*기[간한]|사용\s*기[간한]|만료|까지|교환\s*기[간한]/;
+  var OCR_GENERIC = /^(기프티콘|모바일\s*(교환권|상품권)|교환권|상품권|선물하기|카카오톡\s*선물하기|선물|쿠폰|gift\s*card|coupon|e-?쿠폰)$/i;
+  var OCR_HEADER = /선물함|선물하기|쿠폰함|기프티콘함|받은\s*선물|보관함/;   // 앱 머리글 줄 — 상품명 후보에서 뺌
+  var OCR_LABEL = /^(상품명|상품|메뉴|교환처|사용처|브랜드|발행처|매장|유효\s*기[간한]|사용\s*기[간한]|금액)\s*[:：]?\s*/;
+  function digitRun(s) { var m = s.replace(/[\s\-]/g, '').match(/\d{10,}/); return !!m; }
+  // 사람에게 보여 줄 때도 긴 숫자는 가립니다(바코드 번호가 섞여 읽혔을 때)
+  // (숫자 10자리 이상이 빈칸·하이픈으로만 이어진 덩어리. 줄은 넘지 않음 — 날짜 2026-10-05 는 8자리라 그대로)
+  function maskLongDigits(s) {
+    return str(s).replace(/\d[\d \-]{8,}\d/g, function (m) { return m.replace(/\D/g, '').length >= 10 ? m.replace(/\d/g, '*') : m; });
+  }
+  function cleanLine(x) { return str(x).replace(/[|｜]/g, ' ').replace(/\s+/g, ' ').trim(); }
+  function keepLine(x) { return x && !OCR_SKIP.test(x) && !digitRun(x); }
+  // 입력: 글자(문자열) 또는 { text, lines:[{text, h(글자 높이 px), conf(0~100)}] } — 줄 높이가 있으면 상품명 고르기에 씁니다.
+  function ocrInput(input) {
+    if (input && typeof input === 'object' && Array.isArray(input.lines) && input.lines.length) {
+      return input.lines.map(function (l) { return { text: cleanLine(l.text), h: +l.h || 0, conf: l.conf == null ? 100 : +l.conf }; })
+        .filter(function (l) { return keepLine(l.text); });
+    }
+    var t = input && typeof input === 'object' ? input.text : input;
+    return str(t).split(/\r?\n/).map(function (x) { return { text: cleanLine(x), h: 0, conf: 100 }; }).filter(function (l) { return keepLine(l.text); });
+  }
+  // 한 줄에서 날짜 후보들 — 전체 날짜(2026.10.31 · 26.10.31 · 2026년 10월 31일)와 월/일(~10/31, 10월 31일까지)
+  function datesIn(line, today) {
+    var out = [];
+    var full = /(20\d{2}|\d{2})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*일?/g, m;
+    var used = line;
+    while ((m = full.exec(line))) {
+      var y = m[1].length === 2 ? 2000 + +m[1] : +m[1];
+      var d = y + '-' + pad(+m[2]) + '-' + pad(+m[3]);
+      if (isDate(d)) out.push({ date: d, full: true, idx: m.index });
+      used = used.slice(0, m.index) + Array(m[0].length + 1).join(' ') + used.slice(m.index + m[0].length);
+    }
+    var md = /(~|까지\s*)?\s*(\d{1,2})\s*[./월]\s*(\d{1,2})\s*(일)?\s*(까지)?/g;
+    while ((m = md.exec(used))) {
+      if (!(m[1] || m[5] || m[4] || OCR_EXP_KEY.test(line))) continue;
+      var yy = +today.slice(0, 4), cand = yy + '-' + pad(+m[2]) + '-' + pad(+m[3]);
+      if (!isDate(cand)) continue;
+      if (daysLeft(cand, today) < -31) cand = (yy + 1) + cand.slice(4);   // 지난 달보다 오래전이면 내년
+      out.push({ date: cand, full: false, idx: m.index });
+    }
+    return out;
+  }
+  // → { ok, value:{title,brand,expiresOn,amount}, warnings, errors }
+  function parseOcrText(input, today) {
+    today = today || todayStr();
+    var rows = ocrInput(input);
+    var lines = rows.map(function (r) { return r.text; });
+    var warnings = [];
+    var v = { title: '', brand: '', expiresOn: null, amount: null };
+    function labeled(re) {
+      for (var i = 0; i < lines.length; i++) { var m = lines[i].match(re); if (m && str(m[2])) return str(m[2]); }
+      return '';
+    }
+    v.title = labeled(/^(상품명|상품|메뉴)\s*[:：]\s*(.+)$/).slice(0, 100);
+    v.brand = labeled(/^(교환처|사용처|브랜드|발행처|매장)\s*[:：]?\s*(.+)$/).replace(/\s*(전\s*(매장|지점)|전국\s*매장|매장|에서\s*사용)$/, '').slice(0, 50);
+
+    // 유효기간: 「유효기간·까지·~」가 붙은 날짜 중 가장 늦은 것(기간이면 끝 날)
+    var keyed = [], all = [];
+    lines.forEach(function (ln, i) {
+      var ds = datesIn(ln, today);
+      var near = OCR_EXP_KEY.test(ln) || (i > 0 && /^(유효\s*기[간한]|사용\s*기[간한])\s*[:：]?$/.test(lines[i - 1]));
+      ds.forEach(function (d) { all.push(d); if (near || /~/.test(ln)) keyed.push(d); });
+    });
+    function latest(arr) { return arr.map(function (d) { return d.date; }).sort().pop(); }
+    if (keyed.length) {
+      v.expiresOn = latest(keyed);
+      if (!keyed.some(function (d) { return d.full && d.date === v.expiresOn; })) warnings.push('유효기간에 연도가 없어 ' + v.expiresOn.slice(0, 4) + '년으로 넣었습니다. 확인해 주세요.');
+    } else if (all.length) {
+      v.expiresOn = latest(all);
+      warnings.push('「유효기간」 글자를 못 찾아 사진 속 가장 늦은 날짜(' + v.expiresOn + ')를 넣었습니다. 꼭 확인해 주세요.');
+    } else warnings.push('유효기간을 읽지 못했습니다. 직접 넣어 주세요.');
+
+    // 금액형: 「10,000원권」 · 「1만원권」 · 「금액권 10,000원」
+    var joined = lines.join('\n');
+    var am = joined.match(/(\d{1,3}(?:,\d{3})+|\d+)\s*원\s*(권|상품권|금액권)/) || joined.match(/(\d+\s*만\s*(?:\d\s*천\s*)?)원\s*(권|상품권|금액권)/) ||
+      (/금액권|상품권/.test(joined) ? joined.match(/(\d{1,3}(?:,\d{3})+|\d+\s*만)\s*원/) : null);
+    if (am) {
+      var n = parseWon(am[1].replace(/\s/g, '') + (/만|천/.test(am[1]) ? '원' : ''));
+      if (typeof n === 'number' && n >= 1000 && n <= MAX_FACE_VALUE) v.amount = n;
+    }
+
+    // 상품명 라벨이 없으면: 라벨·날짜·앱 머리글·일반 낱말·흐리게 읽힌 줄을 빼고,
+    // 줄 높이를 알면 글자가 가장 큰 줄(보통 상품명이 가장 큼), 모르면 글자가 가장 많은 앞쪽 줄
+    if (!v.title) {
+      var best = null;
+      rows.slice(0, 12).forEach(function (r, i) {
+        var ln = r.text;
+        if (OCR_LABEL.test(ln) || OCR_EXP_KEY.test(ln) || OCR_GENERIC.test(ln) || OCR_HEADER.test(ln) || datesIn(ln, today).length) return;
+        if (v.brand && ln === v.brand) return;
+        if (r.conf < 60) return;
+        var letters = (ln.match(/[가-힣A-Za-z]/g) || []).length;
+        if (letters < 2 || ln.length > 40) return;
+        if (/^[\d,\s]+(만\s*)?원\s*(권|상품권|금액권)?$/.test(ln) || /^\d+\s*만\s*원\s*(권|상품권|금액권)?$/.test(ln)) return;  // 「10,000원권」만 있는 줄은 금액
+        var score = r.h ? r.h * 100 - i : letters - i * 0.5;   // 같으면 위쪽 줄
+        if (!best || score > best.score) best = { ln: ln, score: score, i: i };
+      });
+      // 발행처 라벨이 없으면: 상품명 바로 위의 짧은 줄(선물 화면은 보통 브랜드 → 상품명 순)
+      if (best && !v.brand && best.i > 0) {
+        var up = rows[best.i - 1].text;
+        if (up.length <= 20 && /[가-힣A-Za-z]{2}/.test(up) && !OCR_HEADER.test(up) && !OCR_LABEL.test(up) && !OCR_GENERIC.test(up) && !datesIn(up, today).length && rows[best.i - 1].conf >= 60) {
+          v.brand = up.slice(0, 50);
+          warnings.push('발행처를 추측해 넣었습니다(「' + v.brand + '」). 확인해 주세요.');
+        }
+      }
+      if (best) { v.title = best.ln.slice(0, 100); warnings.push('상품명을 추측해 넣었습니다(「' + v.title + '」). 사진과 맞는지 확인해 주세요.'); }
+      else warnings.push('상품명을 읽지 못했습니다. 직접 적어 주세요.');
+    }
+    if (!v.title && !v.brand && !v.expiresOn && v.amount == null) {
+      return { ok: false, errors: ['사진에서 읽은 글자가 거의 없습니다. 기프티콘 부분만 잘라 더 선명한 캡처로 다시 해 주세요.'], warnings: warnings, value: null };
+    }
+    return { ok: true, errors: [], warnings: warnings, value: v };
+  }
+
+  // ── 가족에게 보내기 — 휴대폰 공유 창·문자 앱 (무료, 사람이 보내기를 누름) ──
+  // '010-1234-5678' · '+82 10 1234 5678' → '01012345678'. 아니면 null
+  function normPhone(s) {
+    var d = str(s).replace(/[\s\-().]/g, '');
+    if (/^\+82/.test(d)) d = '0' + d.slice(3);
+    return /^0\d{8,10}$/.test(d) ? d : null;
+  }
+  function shareLine(g, today, nameOf) {
+    var d = daysLeft(g.expiresOn, today);
+    var dd = d < 0 ? '만료' : d === 0 ? 'D-DAY' : 'D-' + d;
+    var s = '· ' + g.title + (g.brand ? ' (' + g.brand + ')' : '') + ' — ' + dd + ', ' + shortDate(g.expiresOn) + '까지';
+    if (g.isAmount) s += ', 잔액 ' + won(g.balance);
+    if (g.reservedBy && nameOf) s += ', 예약: ' + nameOf(g.reservedBy);
+    return s;
+  }
+  // 한 장 또는 여러 장(오늘의 알림 모두)을 보낼 글. 바코드·사진은 넣지 않습니다.
+  function shareText(list, today, nameOf) {
+    list = Array.isArray(list) ? list : [list];
+    var head = list.length === 1 ? '[가족 기프티콘] 유효기간이 다가옵니다' : '[가족 기프티콘] 오늘의 알림 ' + list.length + '건';
+    return [head].concat(list.map(function (g) { return shareLine(g, today, nameOf); }),
+      ['쓰면 보관함에서 「사용함」을 눌러 주세요.']).join('\n');
+  }
+  // 문자 앱 여는 주소. 본문 붙이는 방식이 다릅니다 — iOS: sms:번호&body= (여러 명이면 sms:/open?addresses=),
+  // Android: sms:번호,번호?body=
+  function smsHref(phones, body, platform) {
+    phones = (phones || []).map(normPhone).filter(Boolean);
+    var b = encodeURIComponent(body || '');
+    if (platform === 'ios') {
+      if (phones.length > 1) return 'sms:/open?addresses=' + phones.join(',') + '&body=' + b;
+      return 'sms:' + (phones[0] || '') + '&body=' + b;
+    }
+    return 'sms:' + phones.join(',') + '?body=' + b;
+  }
+  function detectPlatform(ua, maxTouch) {
+    ua = str(ua);
+    if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && maxTouch > 1)) return 'ios';
+    return 'android';
+  }
+
   function fmtDateTime(iso) {
     if (!iso) return '';
     var d = new Date(iso);
@@ -424,6 +580,8 @@
     resolveAlertDays: resolveAlertDays, alertDaysText: alertDaysText,
     parseWon: parseWon, won: won, balanceText: balanceText, spendResult: spendResult, autoUsed: autoUsed,
     READ_PROMPT: READ_PROMPT, parseReadAnswer: parseReadAnswer, validateOpenAIKey: validateOpenAIKey,
+    parseOcrText: parseOcrText, maskLongDigits: maskLongDigits,
+    normPhone: normPhone, shareText: shareText, smsHref: smsHref, detectPlatform: detectPlatform,
     STATUS_LABEL: STATUS_LABEL, TABS: TABS, ACTIONS: ACTIONS, IMAGE_MAX_SIDE: IMAGE_MAX_SIDE,
     todayStr: todayStr, isDate: isDate, normDate: normDate, daysLeft: daysLeft, addDays: addDays, shortDate: shortDate,
     statusOf: statusOf, ddayText: ddayText, statusText: statusText, summarize: summarize,

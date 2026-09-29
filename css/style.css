@@ -233,3 +233,11 @@ img { max-width: 100%; }
 .read-helper .row { margin-bottom: 10px; }
 .read-prompt { width: 100%; font-size: .82rem; color: var(--muted); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 10px; resize: vertical; }
 .read-msg p { margin: 6px 0 0; }
+
+/* 가족에게 보내기 · 무료 글자 읽기 (2026-09-29 저녁) */
+.send-text { width: 100%; font-size: .9rem; border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin: 8px 0; resize: vertical; white-space: pre-wrap; }
+.send-row { flex-wrap: wrap; gap: 8px; }
+.alert-box .row { margin: 8px 0 4px; }
+.ocr-raw { margin-top: 8px; }
+.ocr-raw summary { cursor: pointer; color: var(--muted); font-size: .85rem; min-height: 32px; }
+.ocr-raw pre { white-space: pre-wrap; word-break: keep-all; overflow-wrap: break-word; font-size: .8rem; background: var(--surface-2); border-radius: 8px; padding: 8px; max-height: 220px; overflow: auto; }

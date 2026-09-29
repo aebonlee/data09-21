@@ -332,4 +332,92 @@ test('예시: 모든 카드에 사진 · 예약자는 구성원 · 기록이 등
   for (let i = 1; i < db.log.length; i++) assert.ok(db.log[i - 1].createdAt <= db.log[i].createdAt);
 });
 
+console.log('무료 글자 읽기(OCR) 결과 나누기 — 2026-09-29 저녁');
+// 아래 글자는 test/ocr-samples/ 가짜 기프티콘을 Tesseract.js 로 실제로 읽은 결과(바코드 번호는 가짜)
+const OCR_CAFE = '선물함 (예시ㆍ가짜 쿠폰)\n하늘카페\n아메리카노 Tall\n교환처 : 하늘카페\n유효기간 2026.10.31\n9000 1111 2222 33';
+test('라벨 있는 캡처: 교환처·유효기간, 상품명은 머리글(선물함)을 건너뜀', () => {
+  const r = L.parseOcrText(OCR_CAFE, TODAY);
+  assert.ok(r.ok);
+  assert.deepEqual(r.value, { title: '아메리카노 Tall', brand: '하늘카페', expiresOn: '2026-10-31', amount: null });
+});
+test('바코드·쿠폰·주문번호는 어느 칸에도 들어가지 않는다', () => {
+  const t = '8801234567890\n쿠폰번호 1234-5678-9012\n주문번호 20260929-771\n치즈케이크\n유효기간 ~ 2026.11.01\n1234 5678 9012 3456';
+  const r = L.parseOcrText(t, TODAY);
+  const all = JSON.stringify(r);
+  for (const bad of ['8801234567890', '1234', '9012', '771']) assert.ok(!all.includes(bad), bad);
+  assert.equal(r.value.title, '치즈케이크');
+  assert.equal(r.value.expiresOn, '2026-11-01');
+});
+test('날짜 모양: 2026년 12월 24일까지 · 26.10.09 · 기간(시작 ~ 끝)은 끝 날 · ~10/20 은 올해', () => {
+  assert.equal(L.parseOcrText('치킨\n유효기간 2026년 12월 24일까지', TODAY).value.expiresOn, '2026-12-24');
+  assert.equal(L.parseOcrText('라떼\n교환 기한 26.10.09', TODAY).value.expiresOn, '2026-10-09');
+  assert.equal(L.parseOcrText('케이크\n유효기간\n2026.09.01 ~ 2026.11.15', TODAY).value.expiresOn, '2026-11-15');
+  const r = L.parseOcrText('아이스크림 파인트\n~10/20 까지 사용', TODAY);
+  assert.equal(r.value.expiresOn, '2026-10-20');
+  assert.ok(r.warnings.some((w) => w.includes('연도가 없어')));
+  // 연도 없는 날짜가 한참 지난 달이면 내년
+  assert.equal(L.parseOcrText('빵\n~01/15 까지', TODAY).value.expiresOn, '2027-01-15');
+});
+test('「유효기간」 글자가 없으면 가장 늦은 날짜 + 확인 경고, 날짜가 없으면 경고만', () => {
+  const r = L.parseOcrText('도넛\n발행 2026.09.01\n2026.12.31', TODAY);
+  assert.equal(r.value.expiresOn, '2026-12-31');
+  assert.ok(r.warnings.some((w) => w.includes('가장 늦은 날짜')));
+  const r2 = L.parseOcrText('도넛 세트', TODAY);
+  assert.equal(r2.value.expiresOn, null);
+  assert.ok(r2.warnings.some((w) => w.includes('유효기간을 읽지 못했습니다')));
+});
+test('금액형: 10,000원권 · 1만원권 → 금액, 「10,000원권」 줄은 상품명이 아님, 「전 매장」은 발행처에서 뗌', () => {
+  const r = L.parseOcrText('선물함\n별빛마트 모바일 상품권\n10,000원권\n사용처 : 별빛마트 전 매장\n사용기한 ~ 2026-10-05\n8800 1234 5678 90', TODAY);
+  assert.deepEqual(r.value, { title: '별빛마트 모바일 상품권', brand: '별빛마트', expiresOn: '2026-10-05', amount: 10000 });
+  assert.equal(L.parseOcrText('편의점 상품권\n1만원권\n유효기간 2026.12.01', TODAY).value.amount, 10000);
+  assert.equal(L.parseOcrText('아메리카노\n유효기간 2026.12.01', TODAY).value.amount, null);
+});
+test('줄 높이를 알면 가장 큰 글자가 상품명, 그 위 짧은 줄이 발행처(추측 경고), 흐린 줄(확신도 낮음)은 제외', () => {
+  const r = L.parseOcrText({ text: '', lines: [
+    { text: 'MEE (예시 가짜)', h: 22, conf: 41 },
+    { text: '달빛베이커리', h: 22, conf: 92 },
+    { text: '생크림 케이크 1호', h: 32, conf: 95 },
+    { text: '유효기간', h: 22, conf: 90 },
+    { text: '2026.09.01 ~ 2026.11.15', h: 22, conf: 90 }] }, TODAY);
+  assert.deepEqual(r.value, { title: '생크림 케이크 1호', brand: '달빛베이커리', expiresOn: '2026-11-15', amount: null });
+  assert.ok(r.warnings.some((w) => w.includes('발행처를 추측')));
+});
+test('읽은 것이 없으면 실패 · 보여 줄 때 긴 숫자(10자리 이상)만 가림, 날짜는 그대로', () => {
+  assert.equal(L.parseOcrText('', TODAY).ok, false);
+  assert.equal(L.parseOcrText('1234 5678 9012 3456\n== ==', TODAY).ok, false);
+  assert.equal(L.maskLongDigits('유효기간 2026.10.31\n9000 1111 2222 33'), '유효기간 2026.10.31\n**** **** **** **');
+  assert.equal(L.maskLongDigits('사용기한 ~ 2026-10-05'), '사용기한 ~ 2026-10-05');
+});
+
+console.log('가족에게 보내기 (휴대폰 공유 창 · 문자 앱)');
+test('전화번호 정리: 하이픈·빈칸·+82 → 010…, 이상한 값은 null', () => {
+  assert.equal(L.normPhone('010-1234-5678'), '01012345678');
+  assert.equal(L.normPhone('+82 10 3333 4444'), '01033334444');
+  assert.equal(L.normPhone('02-123-4567'), '021234567');
+  assert.equal(L.normPhone('12'), null);
+  assert.equal(L.normPhone(''), null);
+});
+test('문자 주소: Android 는 ?body=, iOS 는 &body= (여러 명이면 /open?addresses=), 본문 인코딩', () => {
+  assert.equal(L.smsHref(['010-1111-2222', '01033334444'], 'a b&c', 'android'), 'sms:01011112222,01033334444?body=a%20b%26c');
+  assert.equal(L.smsHref(['01011112222'], '안녕', 'ios'), 'sms:01011112222&body=%EC%95%88%EB%85%95');
+  assert.equal(L.smsHref(['01011112222', '01033334444'], 'x', 'ios'), 'sms:/open?addresses=01011112222,01033334444&body=x');
+  assert.equal(L.smsHref([], 'x', 'ios'), 'sms:&body=x');
+  assert.equal(L.smsHref(['bad'], 'x', 'android'), 'sms:?body=x');
+});
+test('기기 판별: iPhone·iPad(데스크톱 모드 포함)=ios, 그 밖=android', () => {
+  assert.equal(L.detectPlatform('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)', 5), 'ios');
+  assert.equal(L.detectPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 5), 'ios');
+  assert.equal(L.detectPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 0), 'android');
+  assert.equal(L.detectPlatform('Mozilla/5.0 (Linux; Android 14; Pixel 8)', 5), 'android');
+});
+test('보낼 글: 한 장 / 여러 장, D-day·잔액·예약자, 바코드·메모는 넣지 않음', () => {
+  const one = L.shareText(g({ title: '아메리카노', brand: '카페', expiresOn: '2026-10-01', memo: '비밀 메모' }), TODAY, () => '');
+  assert.equal(one, '[가족 기프티콘] 유효기간이 다가옵니다\n· 아메리카노 (카페) — D-2, 2026. 10. 1.까지\n쓰면 보관함에서 「사용함」을 눌러 주세요.');
+  const many = L.shareText([g({ title: 'A', expiresOn: TODAY }), g({ title: 'B', expiresOn: '2026-10-05', isAmount: true, balance: 6500, reservedBy: 'u1' })], TODAY, (id) => id === 'u1' ? '엄마' : '');
+  assert.ok(many.startsWith('[가족 기프티콘] 오늘의 알림 2건'));
+  assert.ok(many.includes('· A — D-DAY, 2026. 9. 29.까지'));
+  assert.ok(many.includes('· B — D-6, 2026. 10. 5.까지, 잔액 6,500원, 예약: 엄마'));
+  assert.ok(!one.includes('비밀 메모'));
+});
+
 console.log('\n' + passed + '개 통과' + (process.exitCode ? ' · 실패 있음' : ''));

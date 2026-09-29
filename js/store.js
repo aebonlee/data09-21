@@ -37,7 +37,9 @@
   function loadSettings() {
     var s = readJson(KEY_SETTINGS) || {};
     var days = L.resolveAlertDays(s.alertDays, !!s.alertCustom);
-    return { alertDays: days, alertCustom: !!s.alertCustom, tab: s.tab || 'usable', demoMe: s.demoMe || null };
+    // phones: { 구성원 userId: '01012345678' } — 「가족에게 보내기」 문자 받을 번호(선택). DB 에 올리지 않고 이 기기에만.
+    var phones = s.phones && typeof s.phones === 'object' ? s.phones : {};
+    return { alertDays: days, alertCustom: !!s.alertCustom, tab: s.tab || 'usable', demoMe: s.demoMe || null, phones: phones };
   }
   function saveSettings(s) { return set(KEY_SETTINGS, JSON.stringify(s)); }
 
