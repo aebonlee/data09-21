@@ -241,6 +241,64 @@ begin
 end $t$;
 
 -- ----------------------------------------------------------------------------
+-- 금액형 상품권 — 나눠 쓰기(RPC) · 잔액 0 이면 사용함 · 수동 체크 우선 · 기록
+-- ----------------------------------------------------------------------------
+do $t$ begin raise notice '[프로젝트] 금액형 상품권 — 잔액 · 나눠 쓰기'; end $t$;
+set request.jwt.claim.sub = 'aaaaaaaa-0000-0000-0000-000000000001';
+do $t$
+declare v_fam uuid := current_setting('test.fam_a')::uuid; g public.giftcons; v_plain uuid;
+begin
+  insert into public.giftcons (family_id, title, expires_on, is_amount, face_value, balance)
+  values (v_fam, '상품권 1만원', current_date + 20, true, 10000, 10000) returning * into g;
+  perform set_config('test.amt', g.id::text, false);
+  perform public._assert(g.is_amount and g.face_value = 10000 and g.balance = 10000 and not g.used, '금액형 등록: 액면가·잔액 1만 원, 아직 사용 안 함');
+
+  g := public.spend_giftcon(g.id, 3500);
+  perform public._assert_eq(g.balance, 6500, '3,500원 나눠 쓰면 잔액 6,500원');
+  perform public._assert(not g.used, '잔액이 남으면 사용함이 아니다');
+  perform public._assert_eq((select detail from public.giftcon_log where giftcon_id = g.id and action = '금액사용' order by id desc limit 1),
+    '3,500원 사용 · 잔액 6,500원', '기록에 「금액사용 — 쓴 금액 · 잔액」이 남는다');
+
+  perform public._assert_raises(format($q$select public.spend_giftcon(%L, 7000)$q$, g.id), '22023', '잔액보다 많이 쓸 수 없다');
+  perform public._assert_raises(format($q$select public.spend_giftcon(%L, 0)$q$, g.id), '22023', '0원 이하는 거절');
+  perform public._assert_raises(format($q$update public.giftcons set balance = 20000 where id = %L$q$, g.id), '23514', '잔액은 액면가를 넘을 수 없다(CHECK)');
+  perform public._assert_raises(format($q$insert into public.giftcons (family_id, title, expires_on, is_amount, face_value) values (%L, 'x', current_date, true, 5000)$q$, v_fam),
+    '23514', '금액형인데 잔액이 비면 CHECK 가 막는다');
+
+  insert into public.giftcons (family_id, title, expires_on, face_value, balance) values (v_fam, '커피', current_date + 3, 500, 500) returning id into v_plain;
+  perform public._assert((select face_value is null and balance is null from public.giftcons where id = v_plain), '금액형이 아니면 트리거가 금액 칸을 비운다');
+  perform public._assert_raises(format($q$select public.spend_giftcon(%L, 100)$q$, v_plain), '22023', '금액형이 아니면 나눠 쓰기 거절');
+
+  g := public.spend_giftcon(g.id, 6500);
+  perform public._assert(g.balance = 0 and g.used and g.used_by = auth.uid() and g.used_at is not null, '잔액 0 이 되면 사용함(누가·언제 채움)');
+  perform public._assert_raises(format($q$select public.spend_giftcon(%L, 1)$q$, g.id), '22023', '사용함이 된 뒤에는 나눠 쓰기 거절');
+
+  update public.giftcons set used = false where id = g.id returning * into g;
+  perform public._assert(not g.used and g.balance = 0, '잔액 0 인 채 사람이 체크를 풀면 그대로(수동 우선)');
+  update public.giftcons set balance = 2000 where id = g.id returning * into g;
+  perform public._assert(not g.used and g.balance = 2000, '잔액을 바로잡아 늘릴 수 있다');
+  update public.giftcons set balance = 0 where id = g.id returning * into g;
+  perform public._assert(g.used, '다시 0 이 되면 또 사용함');
+
+  perform public._assert_eq((select string_agg(action || coalesce(':' || detail, ''), ' / ' order by id) from public.giftcon_log where giftcon_id = g.id),
+    '등록 / 금액사용:3,500원 사용 · 잔액 6,500원 / 금액사용:6,500원 사용 · 잔액 0원 / 사용 / 사용취소 / 수정:바뀐 칸: 잔액 / 금액사용:2,000원 사용 · 잔액 0원 / 사용',
+    '기록 순서: 등록 · 금액사용 · (다 쓰면) 사용 · 사용취소 · 잔액 바로잡기 = 수정');
+
+  insert into public.giftcons (family_id, title, expires_on, is_amount, face_value, balance) values (v_fam, '다 쓴 상품권', current_date, true, 3000, 0) returning * into g;
+  perform public._assert(g.used and g.used_by = auth.uid(), '잔액 0 으로 등록하면 바로 사용함');
+end $t$;
+set request.jwt.claim.sub = 'cccccccc-0000-0000-0000-000000000003';
+do $t$ begin
+  perform public._assert_raises(format($q$select public.spend_giftcon(%L, 100)$q$, current_setting('test.amt')), 'P0002', '다른 가족(C)은 A 가족 상품권을 나눠 쓸 수 없다(RLS → 찾지 못함)');
+end $t$;
+set role anon;
+set request.jwt.claim.sub = '';
+do $t$ begin
+  perform public._assert_raises(format($q$select public.spend_giftcon(%L, 100)$q$, current_setting('test.amt')), '42501', 'anon 은 spend_giftcon 을 실행하지 못한다');
+end $t$;
+set role authenticated;
+
+-- ----------------------------------------------------------------------------
 -- Storage — 같은 가족 폴더만
 -- ----------------------------------------------------------------------------
 do $t$ begin raise notice '[프로젝트] Storage — 같은 가족 폴더만'; end $t$;

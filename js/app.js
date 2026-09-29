@@ -140,15 +140,16 @@
     var alertBox = null;
     if (alerts.length) {
       alertBox = h('section', { class: 'alert-box', 'aria-label': '유효기간 알림' },
-        h('h2', null, '알림 ' + alerts.length + '건 — 유효기간이 다가옵니다'),
+        h('h2', null, '가족 알림 ' + alerts.length + '건 — 유효기간이 다가옵니다'),
         h('ul', null, alerts.slice(0, 5).map(function (a) {
           return h('li', null,
             h('strong', { class: 'alert-d' }, a.d === 0 ? 'D-DAY' : 'D-' + a.d), ' ',
             a.g.title, a.g.brand ? ' (' + a.g.brand + ')' : '',
+            a.g.isAmount ? h('span', { class: 'muted' }, ' · 잔액 ' + L.won(a.g.balance)) : null,
             a.g.reservedBy ? h('span', { class: 'muted' }, ' · 예약: ' + nameOf(a.g.reservedBy)) : null);
         })),
         alerts.length > 5 ? h('p', { class: 'muted' }, '외 ' + (alerts.length - 5) + '건') : null,
-        h('p', { class: 'hint' }, '알림 시점: ' + settings.alertDays.map(function (d) { return d === 0 ? '당일' : 'D-' + d; }).join(' · ') + ' — 「설정」에서 바꿉니다. 카카오톡·문자 발송은 2단계입니다.'));
+        h('p', { class: 'hint' }, '가족 누구나 보관함을 열면 이 알림을 봅니다. 알림 시점: ' + L.alertDaysText(settings.alertDays) + ' — 「설정」에서 바꿉니다. 가족 전체에게 카카오톡·문자로 보내는 것은 2단계입니다.'));
     }
 
     var list = L.filterList(items, tab, today);
@@ -184,6 +185,8 @@
       }).catch(fail);
     });
     var meta = [g.brand || '발행처 미입력', L.shortDate(g.expiresOn) + '까지'].join(' · ');
+    var spendBtn = g.isAmount && !g.used
+      ? h('button', { type: 'button', class: 'btn small', onclick: function () { spendGiftcon(g); } }, '금액 사용') : null;
     var usedLine = g.used ? '사용: ' + nameOf(g.usedBy) + (g.usedAt ? ' · ' + L.fmtDateTime(g.usedAt) : '') : null;
     return h('article', { class: 'card st-' + st, 'data-id': g.id },
       h('div', { class: 'card-top' },
@@ -191,6 +194,7 @@
         h('div', { class: 'card-body' },
           h('h3', { class: 'card-title' }, g.title),
           h('p', { class: 'card-meta' }, meta),
+          g.isAmount ? h('p', { class: 'card-balance' }, L.balanceText(g)) : null,
           g.reservedBy ? h('p', { class: 'card-resv' }, '예약: ' + nameOf(g.reservedBy)) : null,
           usedLine ? h('p', { class: 'card-used' }, usedLine) : null,
           g.memo ? h('p', { class: 'card-memo' }, g.memo) : null),
@@ -199,9 +203,22 @@
           h('span', { class: 'dday-text', id: 'st-' + g.id }, L.statusText(g, today)))),
       h('div', { class: 'card-actions' },
         h('label', { class: 'used-toggle' }, usedBox, h('span', null, '사용함')),
+        spendBtn,
         resv,
         h('a', { class: 'btn small', href: '#/edit/' + encodeURIComponent(g.id) }, '고치기'),
         h('button', { type: 'button', class: 'btn small danger', onclick: function () { removeGiftcon(g); } }, '삭제')));
+  }
+
+  // 금액형 나눠 쓰기 — 쓴 금액만 적으면 잔액이 줄고, 0 이 되면 「사용함」
+  function spendGiftcon(g) {
+    var v = window.prompt('「' + g.title + '」에서 쓴 금액을 적어 주세요. 지금 잔액 ' + L.won(g.balance) + '\n(예: 4,500 · 5천원)', '');
+    if (v == null) return;
+    var r = L.spendResult(g, v);
+    if (!r.ok) { toast(r.error, true); return; }
+    store.spend(g.id, r.amount).then(function (x) {
+      toast(L.won(r.amount) + ' 썼습니다. 잔액 ' + L.won(x.balance) + (x.used ? ' — 다 써서 「사용함」으로 표시했습니다.' : '.'));
+      return reload();
+    }).catch(fail);
   }
 
   function removeGiftcon(g) {
@@ -233,23 +250,42 @@
     var title = h('input', { name: 'title', required: true, maxlength: '100', value: g ? g.title : '', placeholder: '예) 아메리카노 Tall', autocomplete: 'off' });
     var brand = h('input', { name: 'brand', maxlength: '50', value: g ? g.brand || '' : '', placeholder: '예) ○○카페', autocomplete: 'off' });
     var exp = h('input', { name: 'expiresOn', type: 'date', required: true, value: g ? g.expiresOn : '' });
-    var memo = h('textarea', { name: 'memo', rows: '3', maxlength: '500', placeholder: '예) 금액형 잔액 5,000원 · 생일 선물용' }, g ? g.memo || '' : '');
+    var memo = h('textarea', { name: 'memo', rows: '3', maxlength: '500', placeholder: '예) 생일 선물용' }, g ? g.memo || '' : '');
+    // 금액형 상품권(선택) — 켜면 액면가·잔액 칸이 보입니다
+    var isAmt = h('input', { type: 'checkbox', name: 'isAmount', checked: !!(g && g.isAmount) });
+    var face = h('input', { name: 'faceValue', inputmode: 'numeric', placeholder: '예) 10,000', value: g && g.isAmount ? String(g.faceValue) : '' });
+    var bal = h('input', { name: 'balance', inputmode: 'numeric', placeholder: '비우면 액면가 그대로', value: g && g.isAmount ? String(g.balance) : '' });
+    var amtBox = h('div', { class: 'amount-box' },
+      field('액면가 (원)', face),
+      field('잔액 (원)', bal, '나눠 쓸 때는 보관함 카드의 「금액 사용」을 누르면 쓴 금액이 기록에 남습니다.'));
+    amtBox.hidden = !isAmt.checked;
+    isAmt.addEventListener('change', function () { amtBox.hidden = !isAmt.checked; });
+    var amtField = h('div', { class: 'field' },
+      h('label', { class: 'check' }, isAmt, '금액형 상품권 (예: 1만원권을 나눠 씀)'), amtBox);
     var resv = memberSelect('reservedBy', g ? g.reservedBy : '', '예약 없음');
     var errBox = h('div', { class: 'form-errors', role: 'alert' });
     var saveBtn = h('button', { type: 'submit', class: 'btn primary' }, g ? '고친 내용 저장' : '등록');
     var form = h('form', { class: 'panel gform', novalidate: true },
-      h('div', { class: 'gform-photo' }, preview, field('사진 (기프티콘 캡처)', file, '긴 변 ' + (store.mode === 'demo' ? 900 : L.IMAGE_MAX_SIDE) + 'px 로 줄여 저장합니다.')),
+      h('div', { class: 'gform-photo' }, preview, field('사진 (기프티콘 캡처)', file, '긴 변 ' + (store.mode === 'demo' ? 900 : L.IMAGE_MAX_SIDE) + 'px 로 줄여 저장합니다.'),
+        readHelper(function () { return blob; }, function (v) {
+          if (v.title) title.value = v.title;
+          if (v.brand) brand.value = v.brand;
+          if (v.expiresOn) exp.value = v.expiresOn;
+          if (v.amount) { isAmt.checked = true; amtBox.hidden = false; face.value = String(v.amount); if (!g) bal.value = ''; }
+        })),
       h('div', { class: 'gform-fields' },
         field('상품명 (필수)', title),
         field('발행처(브랜드)', brand),
         field('유효기간 (필수)', exp, '이 날까지 쓸 수 있는 마지막 날'),
         field('예약자', resv, '누가 쓸지 정해 두면 카드에 표시됩니다.'),
+        amtField,
         field('메모', memo),
         errBox,
         h('div', { class: 'row' }, saveBtn, h('a', { class: 'btn', href: '#/' }, '취소'))));
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
-      var r = L.validateGiftcon({ title: title.value, brand: brand.value, expiresOn: exp.value, memo: memo.value, reservedBy: resv.value });
+      var r = L.validateGiftcon({ title: title.value, brand: brand.value, expiresOn: exp.value, memo: memo.value, reservedBy: resv.value,
+        isAmount: isAmt.checked, faceValue: face.value, balance: bal.value });
       errBox.innerHTML = '';
       if (!r.ok) { r.errors.forEach(function (m) { errBox.appendChild(h('p', null, m)); }); return; }
       saveBtn.disabled = true;
@@ -261,8 +297,76 @@
       }).catch(function (e) { saveBtn.disabled = false; fail(e); });
     });
     return [h('h1', null, g ? '기프티콘 고치기' : '기프티콘 등록'),
-      h('p', { class: 'lead' }, '사진은 확인용으로 보관합니다. 상품명과 유효기간은 사진을 보며 직접 적어 주세요(사진 자동 읽기는 2단계).'),
+      h('p', { class: 'lead' }, '사진은 확인용으로 보관합니다. 상품명과 유효기간은 사진을 보며 적어 주세요. 사진 아래 「사진에서 채우기」로 AI 에게 읽게 할 수도 있습니다(선택).'),
       form];
+  }
+
+  // 사진에서 채우기 (선택, 기본 접힘) — 반자동(ChatGPT·Copilot) + 내 OpenAI 키로 바로 읽기
+  // getBlob(): 지금 고른 사진(줄인 JPEG) · fill(v): 읽은 값으로 칸 채우기(저장은 사람이)
+  function readHelper(getBlob, fill) {
+    var msg = h('div', { class: 'read-msg', role: 'status' });
+    function say(lines, isErr) {
+      msg.innerHTML = '';
+      lines.forEach(function (t) { msg.appendChild(h('p', { class: isErr ? 'error-text' : 'hint' }, t)); });
+    }
+    function apply(text) {
+      var r = L.parseReadAnswer(text);
+      if (!r.ok) { say(r.errors, true); return; }
+      fill(r.value);
+      say(['칸을 채웠습니다. 사진과 맞는지 확인한 뒤 「등록」을 눌러 주세요.'].concat(r.warnings));
+    }
+    var copyBtn = h('button', { type: 'button', class: 'btn small' }, '요청문 복사');
+    copyBtn.addEventListener('click', function () {
+      var done = function () { toast('요청문을 복사했습니다. ChatGPT·Copilot 에 사진과 함께 붙여 넣어 주세요.'); };
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(L.READ_PROMPT).then(done, function () { promptBox.select(); });
+      else { promptBox.select(); try { document.execCommand('copy'); done(); } catch (e) { /* 직접 복사 */ } }
+    });
+    var promptBox = h('textarea', { class: 'read-prompt', rows: '5', readonly: true, 'aria-label': '요청문' }, L.READ_PROMPT);
+    var answer = h('textarea', { name: 'readAnswer', rows: '4', placeholder: '{"상품명": "…", "발행처": "…", "유효기간": "2026-10-31", "금액": null}' });
+    var applyBtn = h('button', { type: 'button', class: 'btn small primary', onclick: function () { apply(answer.value); } }, '답으로 칸 채우기');
+
+    var savedKey = Store.loadOpenAIKey();
+    var keyIn = h('input', { type: 'password', name: 'openaiKey', autocomplete: 'off', spellcheck: 'false', placeholder: savedKey ? '저장된 키 있음 (바꾸려면 새로 넣기)' : 'sk-…' });
+    var autoBtn = h('button', { type: 'button', class: 'btn small primary' }, '이 사진 바로 읽기');
+    autoBtn.addEventListener('click', function () {
+      var b = getBlob();
+      if (!b) { say(['먼저 위에서 사진을 골라 주세요(새로 고른 사진만 보냅니다).'], true); return; }
+      var k = keyIn.value.trim() || Store.loadOpenAIKey();
+      var err = L.validateOpenAIKey(k);
+      if (err) { say([err], true); return; }
+      if (keyIn.value.trim()) { Store.saveOpenAIKey(k); keyIn.value = ''; keyIn.placeholder = '저장된 키 있음 (바꾸려면 새로 넣기)'; }
+      autoBtn.disabled = true;
+      say(['사진을 읽는 중…']);
+      var fr = new FileReader();
+      fr.onload = function () {
+        window.GCAI.readPhoto({ key: k, prompt: L.READ_PROMPT, image: fr.result })
+          .then(apply, function (e) { say([e.message], true); })
+          .then(function () { autoBtn.disabled = false; });
+      };
+      fr.onerror = function () { autoBtn.disabled = false; say(['사진을 읽지 못했습니다.'], true); };
+      fr.readAsDataURL(b);
+    });
+    var forget = h('button', { type: 'button', class: 'btn small', onclick: function () {
+      Store.clearOpenAIKey(); keyIn.value = ''; keyIn.placeholder = 'sk-…'; toast('이 브라우저에서 OpenAI 키를 지웠습니다.');
+    } }, '키 지우기');
+
+    return h('details', { class: 'read-helper' },
+      h('summary', null, '사진에서 채우기 (선택)'),
+      h('p', { class: 'hint' }, '사진을 AI 에게 보여 주고 상품명·발행처·유효기간(금액형이면 금액)을 받아 칸을 채웁니다. 사진에 바코드가 있으면 함께 전달되니, 걱정되면 바코드를 가린 캡처를 쓰세요. 채운 뒤에는 꼭 사진과 대조해 주세요.'),
+      h('h3', null, '방법 1 — ChatGPT·Copilot 에 붙여 넣기'),
+      h('ol', { class: 'steps' },
+        h('li', null, '「요청문 복사」를 누릅니다.'),
+        h('li', null, 'ChatGPT 나 Copilot 에 기프티콘 사진을 올리고 요청문을 붙여 넣습니다.'),
+        h('li', null, '받은 답(JSON)을 아래 칸에 그대로 붙여 넣고 「답으로 칸 채우기」를 누릅니다.')),
+      h('div', { class: 'row' }, copyBtn),
+      promptBox,
+      field('AI 답 붙여 넣기', answer),
+      h('div', { class: 'row' }, applyBtn),
+      h('h3', null, '방법 2 — 내 OpenAI 키로 바로 읽기'),
+      h('p', { class: 'hint' }, '본인 OpenAI API 키가 있으면 위에서 고른 사진을 이 브라우저에서 바로 보냅니다(건당 몇 원 수준, 본인 계정에 청구). 키는 이 브라우저에만 저장되고 가족·서버와 나누지 않습니다.'),
+      field('OpenAI API 키', keyIn),
+      h('div', { class: 'row' }, autoBtn, forget),
+      msg);
   }
 
   // ════════════════════════════════════════════════════════
@@ -280,7 +384,7 @@
           h('span', { class: 'log-sub' }, (e.actorName || '(알 수 없음)') + ' · ' + L.fmtDateTime(e.createdAt)));
       })));
     }).catch(function (e) { wrap.innerHTML = ''; wrap.appendChild(h('p', { class: 'error-text' }, e.message)); });
-    return [h('h1', null, '기록'), h('p', { class: 'lead' }, '등록 · 수정 · 사용 · 사용취소 · 예약 · 삭제가 최근 순으로 남습니다. 기록은 고치거나 지울 수 없습니다.'), wrap];
+    return [h('h1', null, '기록'), h('p', { class: 'lead' }, '등록 · 수정 · 사용 · 금액사용(쓴 금액·잔액) · 사용취소 · 예약 · 삭제가 최근 순으로 남습니다. 기록은 고치거나 지울 수 없습니다.'), wrap];
   }
 
   // ════════════════════════════════════════════════════════
@@ -331,16 +435,22 @@
     var custom = h('input', { name: 'alertCustom', placeholder: '예) 10, 5', value: settings.alertDays.filter(function (d) { return L.ALERT_CHOICES.indexOf(d) < 0; }).join(', ') });
     var alertForm = h('form', { class: 'panel' },
       h('h2', null, '알림 시점'),
-      h('p', { class: 'hint' }, '사용하지 않은 기프티콘의 유효기간이 이 날짜 안으로 들어오면 보관함 맨 위에 알림으로 보여 줍니다. 이 기기에만 저장됩니다.'),
+      h('p', { class: 'hint' }, '사용하지 않은 기프티콘의 유효기간이 이 날짜 안으로 들어오면 보관함 맨 위에 가족 알림으로 보여 줍니다. 기본값은 D-7 · D-2 · D-1 입니다. 이 설정은 이 기기에만 저장됩니다(가족 전체에게 카카오톡·문자로 보내는 것은 2단계).'),
       h('div', { class: 'checks' }, checks),
       field('직접 넣기 (며칠 전, 쉼표로)', custom),
-      h('button', { type: 'submit', class: 'btn primary' }, '알림 시점 저장'));
+      h('div', { class: 'row' },
+        h('button', { type: 'submit', class: 'btn primary' }, '알림 시점 저장'),
+        h('button', { type: 'button', class: 'btn', onclick: function () {
+          settings.alertDays = L.DEFAULT_ALERT_DAYS.slice(); settings.alertCustom = false; saveSettings();
+          toast('기본값으로 돌렸습니다: ' + L.alertDaysText(settings.alertDays)); render();
+        } }, '기본값(D-7 · D-2 · D-1)으로')));
     alertForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var picked = Array.prototype.filter.call(alertForm.querySelectorAll('input[name=alert]'), function (c) { return c.checked; }).map(function (c) { return c.value; });
       settings.alertDays = L.parseAlertDays(picked.concat(L.parseAlertDays(custom.value)));
+      settings.alertCustom = true;
       saveSettings();
-      toast(settings.alertDays.length ? '알림 시점을 저장했습니다: ' + settings.alertDays.map(function (d) { return d === 0 ? '당일' : 'D-' + d; }).join(' · ') : '알림을 껐습니다.');
+      toast(settings.alertDays.length ? '알림 시점을 저장했습니다: ' + L.alertDaysText(settings.alertDays) : '알림을 껐습니다.');
       render();
     });
 

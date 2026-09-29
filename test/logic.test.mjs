@@ -101,11 +101,115 @@ test('알림 시점을 D-30 으로 넓히면 30일 남은 것도, 비우면 알�
   assert.deepEqual(L.alertsFor(LIST, [0], TODAY).map((x) => x.g.id), ['c']);
 });
 
+test('알림 기본값 D-7 · D-2 · D-1 (2026-09-29 수강생 답변), 옛 기본값 D-7 · D-1 은 새 기본값으로 올림', () => {
+  assert.deepEqual(L.DEFAULT_ALERT_DAYS, [7, 2, 1]);
+  assert.deepEqual(L.resolveAlertDays(undefined, false), [7, 2, 1]);
+  assert.deepEqual(L.resolveAlertDays([7, 1], false), [7, 2, 1]);
+  assert.deepEqual(L.resolveAlertDays([7, 1], true), [7, 1], '사용자가 직접 저장한 값은 그대로');
+  assert.deepEqual(L.resolveAlertDays([30, 3], false), [30, 3]);
+  assert.deepEqual(L.resolveAlertDays([], true), [], '알림 끔도 그대로');
+  assert.ok(L.ALERT_CHOICES.includes(2));
+  assert.equal(L.alertDaysText([7, 2, 1, 0]), 'D-7 · D-2 · D-1 · 당일');
+});
+test('기본 시점으로 D-2 남은 것은 「D-2 알림」, D-5 는 「D-7 알림」', () => {
+  const x = [g({ id: 'p', expiresOn: L.addDays(TODAY, 2) }), g({ id: 'q', expiresOn: L.addDays(TODAY, 5) })];
+  assert.deepEqual(L.alertsFor(x, L.DEFAULT_ALERT_DAYS, TODAY).map((a) => [a.g.id, a.level]), [['p', 2], ['q', 7]]);
+});
+
+console.log('금액형 상품권');
+test('금액 읽기: 쉼표·원·만/천 단위, 못 읽으면 null', () => {
+  assert.equal(L.parseWon('10,000'), 10000);
+  assert.equal(L.parseWon('5000원'), 5000);
+  assert.equal(L.parseWon('1만원'), 10000);
+  assert.equal(L.parseWon('1만 5천원'), 15000);
+  assert.equal(L.parseWon('3천'), 3000);
+  assert.equal(L.parseWon(''), '');
+  assert.equal(L.parseWon('만원쯤'), null);
+  assert.equal(L.parseWon('-100'), null);
+  assert.equal(L.parseWon(4500), 4500);
+  assert.equal(L.won(1234567), '1,234,567원');
+});
+test('금액형 검증: 액면가 필수, 잔액 비우면 액면가, 잔액 ≤ 액면가, 한도 1천만', () => {
+  const base = { title: '상품권', expiresOn: TODAY, isAmount: true };
+  assert.deepEqual(L.validateGiftcon(Object.assign({}, base, { faceValue: '1만원', balance: '' })).value.balance, 10000);
+  const v = L.validateGiftcon(Object.assign({}, base, { faceValue: '10,000', balance: '3,500' }));
+  assert.equal(v.ok, true);
+  assert.deepEqual([v.value.faceValue, v.value.balance], [10000, 3500]);
+  assert.equal(L.validateGiftcon(Object.assign({}, base, { faceValue: '', balance: '' })).ok, false);
+  assert.match(L.validateGiftcon(Object.assign({}, base, { faceValue: '5000', balance: '6000' })).errors[0], /액면가보다/);
+  assert.equal(L.validateGiftcon(Object.assign({}, base, { faceValue: '20000000' })).ok, false);
+  assert.equal(L.validateGiftcon(Object.assign({}, base, { faceValue: '5000', balance: '0' })).value.balance, 0);
+  // 금액형을 끄면 금액 칸은 버림
+  const off = L.validateGiftcon({ title: 'x', expiresOn: TODAY, isAmount: false, faceValue: '5000', balance: '1' });
+  assert.deepEqual([off.value.faceValue, off.value.balance], [null, null]);
+});
+const nameOfA = (id) => ({ u1: '엄마', u2: '아빠' })[id] || '?';
+const AMT = g({ id: 'm', title: '상품권', isAmount: true, faceValue: 10000, balance: 6500 });
+test('나눠 쓰기: 잔액이 줄고, 0 이 되면 사용함, 잔액보다 많이는 못 씀', () => {
+  assert.deepEqual(L.spendResult(AMT, '4,500'), { ok: true, error: null, amount: 4500, balance: 2000, used: false });
+  assert.deepEqual(L.spendResult(AMT, 6500), { ok: true, error: null, amount: 6500, balance: 0, used: true });
+  assert.match(L.spendResult(AMT, '7000').error, /잔액/);
+  assert.match(L.spendResult(AMT, '0').error, /1원 이상/);
+  assert.match(L.spendResult(AMT, '').error, /숫자/);
+  assert.match(L.spendResult(g(), '100').error, /금액형 상품권이 아닙니다/);
+  assert.match(L.spendResult(Object.assign({}, AMT, { used: true }), '100').error, /사용함/);
+  assert.equal(L.balanceText(AMT), '잔액 6,500원 / 10,000원');
+  assert.equal(L.balanceText(g()), '');
+});
+test('잔액 0 이 「되는 순간」만 자동 사용함 — 이미 0 인 채 체크를 풀면 그대로(수동 우선)', () => {
+  const zero = Object.assign({}, AMT, { balance: 0 });
+  assert.equal(L.autoUsed(AMT, zero), true);
+  assert.equal(L.autoUsed(null, zero), true, '잔액 0 으로 등록하면 사용함');
+  assert.equal(L.autoUsed(zero, Object.assign({}, zero, { used: false })), false, '0 인 채 체크 풀기는 그대로');
+  assert.equal(L.autoUsed(AMT, Object.assign({}, AMT, { balance: 100 })), false);
+  assert.equal(L.autoUsed(g(), g({ used: true })), true, '금액형이 아니면 체크 그대로');
+  assert.equal(L.autoUsed(g(), g()), false);
+});
+test('기록: 나눠 쓰면 「금액사용 N원 · 잔액」, 다 쓰면 + 「사용」, 잔액을 늘려 고치면 「수정: 잔액」', () => {
+  assert.deepEqual(L.logEntriesFor(AMT, Object.assign({}, AMT, { balance: 2000 }), nameOfA).map((x) => [x.action, x.detail]),
+    [['금액사용', '4,500원 사용 · 잔액 2,000원']]);
+  assert.deepEqual(L.logEntriesFor(AMT, Object.assign({}, AMT, { balance: 0, used: true }), nameOfA).map((x) => x.action), ['금액사용', '사용']);
+  assert.deepEqual(L.logEntriesFor(AMT, Object.assign({}, AMT, { balance: 8000 }), nameOfA).map((x) => [x.action, x.detail]),
+    [['수정', '바뀐 칸: 잔액']]);
+  assert.deepEqual(L.logEntriesFor(g(), Object.assign({}, g(), { isAmount: true, faceValue: 5000, balance: 5000 }), nameOfA).map((x) => [x.action, x.detail]),
+    [['수정', '바뀐 칸: 금액형, 액면가']]);
+});
+
+console.log('사진에서 채우기 (선택 도우미)');
+test('요청문: 네 칸을 JSON 으로, 바코드는 읽지 말라고 요청형으로', () => {
+  assert.match(L.READ_PROMPT, /"상품명".*"발행처".*"유효기간".*"금액"/);
+  assert.match(L.READ_PROMPT, /바코드/);
+  assert.match(L.READ_PROMPT, /해줘/);
+});
+test('AI 답 읽기: 코드 블록·앞뒤 말 섞여도, 날짜 형식 바로잡기, 금액 숫자로', () => {
+  const r = L.parseReadAnswer('여기 있습니다.\n```json\n{"상품명": " 아메리카노 T ", "발행처": "카페 A", "유효기간": "2026.10.5", "금액": null}\n```');
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.value, { title: '아메리카노 T', brand: '카페 A', expiresOn: '2026-10-05', amount: null });
+  assert.deepEqual(r.warnings, []);
+  const e = L.parseReadAnswer('{"title":"상품권","expiresOn":"2027-01-31","amount":"1만원"}');
+  assert.deepEqual(e.value, { title: '상품권', brand: '', expiresOn: '2027-01-31', amount: 10000 });
+});
+test('AI 답 읽기: 못 읽은 칸은 경고, JSON 없으면 실패, 빈 답은 실패', () => {
+  const r = L.parseReadAnswer('{"상품명":"케이크","유효기간":"다음 달"}');
+  assert.equal(r.ok, true);
+  assert.equal(r.value.expiresOn, null);
+  assert.match(r.warnings.join(' '), /날짜로 읽지 못했/);
+  assert.equal(L.parseReadAnswer('사진이 흐립니다').ok, false);
+  assert.equal(L.parseReadAnswer('{"상품명": 이상}').ok, false);
+  assert.equal(L.parseReadAnswer('{"상품명":"","유효기간":""}').ok, false);
+  assert.equal(L.parseReadAnswer('[1,2]').ok, false);
+});
+test('OpenAI 키 모양 검사 (브라우저에만 저장)', () => {
+  assert.equal(L.validateOpenAIKey('sk-proj-abcdefghijklmnopqrstuvwxyz0123'), null);
+  assert.ok(L.validateOpenAIKey(''));
+  assert.ok(L.validateOpenAIKey('eyJhbGciOi.xxx.yyy'));
+});
+
 console.log('입력 검증');
 test('상품명·유효기간 필수, 날짜 형식 바로잡기', () => {
   const r = L.validateGiftcon({ title: '  아메리카노 ', brand: '카페', expiresOn: '2026.10.5', memo: '', reservedBy: '' });
   assert.equal(r.ok, true);
-  assert.deepEqual(r.value, { title: '아메리카노', brand: '카페', expiresOn: '2026-10-05', memo: '', reservedBy: null });
+  assert.deepEqual(r.value, { title: '아메리카노', brand: '카페', expiresOn: '2026-10-05', memo: '', reservedBy: null, isAmount: false, faceValue: null, balance: null });
   const bad = L.validateGiftcon({ title: ' ', expiresOn: '' });
   assert.equal(bad.ok, false);
   assert.equal(bad.errors.length, 2);
@@ -193,7 +297,12 @@ test('fromRow / toRow — 누가·언제는 앱이 보내지 않는다', () => {
   assert.equal(x.usedBy, 'u2');
   assert.equal(x.used, true);
   const back = L.toRow(Object.assign({}, x, { brand: '' }));
-  assert.deepEqual(Object.keys(back).sort(), ['brand', 'expires_on', 'image_path', 'memo', 'reserved_by', 'title', 'used'].sort());
+  assert.deepEqual(Object.keys(back).sort(), ['balance', 'brand', 'expires_on', 'face_value', 'image_path', 'is_amount', 'memo', 'reserved_by', 'title', 'used'].sort());
+  assert.equal(back.is_amount, false);
+  assert.equal(back.face_value, null);
+  const amt = L.fromRow(Object.assign({}, r, { is_amount: true, face_value: 10000, balance: 3000 }));
+  assert.deepEqual([amt.isAmount, amt.faceValue, amt.balance], [true, 10000, 3000]);
+  assert.deepEqual(L.toRow({ isAmount: false, faceValue: 5, balance: 5 }), { is_amount: false, face_value: null, balance: null });
   assert.equal(back.brand, null);
   assert.ok(!('used_by' in back) && !('created_by' in back) && !('family_id' in back));
 });
@@ -217,6 +326,9 @@ test('예시: 모든 카드에 사진 · 예약자는 구성원 · 기록이 등
   assert.equal(db.log.filter((e) => e.action === '등록').length, 8);
   assert.equal(db.log.filter((e) => e.action === '사용').length, 1);
   assert.equal(db.log.filter((e) => e.action === '예약').length, 2);
+  assert.equal(db.log.filter((e) => e.action === '금액사용').length, 1);
+  const amt = db.giftcons.filter((x) => x.isAmount);
+  assert.deepEqual(amt.map((x) => [x.faceValue, x.balance, x.used]), [[10000, 6500, false]]);
   for (let i = 1; i < db.log.length; i++) assert.ok(db.log[i - 1].createdAt <= db.log[i].createdAt);
 });
 

@@ -22,12 +22,17 @@
 
 **service_role(secret) 키는 절대 앱에 넣지 마세요.** 모든 보안(RLS)을 건너뛰는 키입니다. 앱은 anon 키가 아니면 거부합니다.
 
+## 이미 실행한 DB 올리기 (2026-09-29 오후 늦게 — 금액형 상품권)
+
+1단계 schema.sql 을 이미 실행했다면 **새 schema.sql 전체를 SQL Editor 에서 한 번 더 실행**하세요. 기존 가족·기프티콘·기록은 그대로 두고 금액형 칸(`is_amount · face_value · balance`), 나눠 쓰기 RPC(`spend_giftcon`), 기록 「금액사용」만 더해집니다. 앱에서 「DB 가 옛 판입니다」가 보이면 이 단계를 빠뜨린 것입니다.
+
 ## 보안 요약
 
 - 같은 가족만 기프티콘·사진·기록을 봅니다(RLS, Storage 정책).
 - 사용한 사람·등록한 사람·시각은 DB 가 로그인한 사람으로 기록합니다.
 - 기록(giftcon_log)은 누구도 고치거나 지울 수 없습니다.
+- 금액형 나눠 쓰기는 RPC 가 행을 잠그고 잔액을 줄여, 두 사람이 동시에 써도 잔액이 어긋나지 않습니다.
 
 ## 로컬 검증 (개발자용)
 
-`./scripts/sqltest/run.sh` — 임시 PostgreSQL 에 schema.sql 을 두 번 적용하고 권한·RLS·트리거·Storage 정책을 확인합니다(PostgreSQL 16·17 필요). 운영 DB 에서는 검증 파일이 스스로 멈춥니다.
+`./scripts/sqltest/run.sh` — 임시 PostgreSQL 에 schema.sql 을 두 번 적용하고(1단계 판 위에 다시 실행하는 올림 검사 포함) 권한·RLS·트리거·Storage 정책을 확인합니다(PostgreSQL 16·17 필요). 운영 DB 에서는 검증 파일이 스스로 멈춥니다.

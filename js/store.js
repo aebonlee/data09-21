@@ -9,7 +9,7 @@
  *   myFamily() → { family:{id,name,inviteCode}, members:[{userId,displayName,role}], me } | null
  *   createFamily(name, displayName) · joinFamily(code, displayName) · renameMe(displayName)
  *   listGiftcons() · addGiftcon(value, imageBlob) · updateGiftcon(id, patch, imageBlob)
- *   setUsed(id, bool) · setReserved(id, userId|null) · deleteGiftcon(id)
+ *   setUsed(id, bool) · setReserved(id, userId|null) · spend(id, 원) · deleteGiftcon(id)
  *   imageUrl(g) · listLog()
  *
  * Supabase 주소·키는 이 파일에 없습니다. 사용자가 「설정」에 넣은 값을 localStorage 에만 둡니다.
@@ -20,6 +20,7 @@
   var KEY_DEMO = 'data09-21.demo';
   var KEY_CONN = 'data09-21.conn';
   var KEY_SETTINGS = 'data09-21.settings';
+  var KEY_OPENAI = 'data09-21.openai';   // 사진 읽기 자동 모드용 사용자 본인 키 — 이 브라우저에만
   var memory = {};
   var storageOk = true;
 
@@ -35,14 +36,17 @@
   // ── 설정(알림 시점 등) — 기기마다 ─────────────────────────
   function loadSettings() {
     var s = readJson(KEY_SETTINGS) || {};
-    var days = L.parseAlertDays(s.alertDays == null ? L.DEFAULT_ALERT_DAYS : s.alertDays);
-    return { alertDays: days, tab: s.tab || 'usable', demoMe: s.demoMe || null };
+    var days = L.resolveAlertDays(s.alertDays, !!s.alertCustom);
+    return { alertDays: days, alertCustom: !!s.alertCustom, tab: s.tab || 'usable', demoMe: s.demoMe || null };
   }
   function saveSettings(s) { return set(KEY_SETTINGS, JSON.stringify(s)); }
 
   function loadConn() { var c = readJson(KEY_CONN); return c && c.url && c.key ? c : null; }
   function saveConn(url, key) { return set(KEY_CONN, JSON.stringify({ url: url, key: key })); }
   function clearConn() { del(KEY_CONN); }
+  function loadOpenAIKey() { return get(KEY_OPENAI) || ''; }
+  function saveOpenAIKey(k) { return set(KEY_OPENAI, k); }
+  function clearOpenAIKey() { del(KEY_OPENAI); }
 
   function uid() {
     if (root.crypto && root.crypto.randomUUID) return root.crypto.randomUUID();
@@ -98,8 +102,10 @@
         var g = {
           id: 'g-' + uid(), familyId: db.family.id, title: v.title, brand: v.brand || '', expiresOn: v.expiresOn,
           memo: v.memo || '', imagePath: null, createdBy: db.me, reservedBy: v.reservedBy || null,
+          isAmount: !!v.isAmount, faceValue: v.isAmount ? v.faceValue : null, balance: v.isAmount ? v.balance : null,
           used: false, usedBy: null, usedAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
         };
+        if (L.autoUsed(null, g)) { g.used = true; g.usedBy = db.me; g.usedAt = g.createdAt; }
         if (dataUrl) { g.imagePath = 'demo:' + g.id; db.images[g.id] = dataUrl; }
         db.giftcons.push(g);
         log(null, g);
@@ -110,8 +116,10 @@
     this.updateGiftcon = function (id, patch, imageBlob) {
       return (imageBlob ? blobToDataUrl(imageBlob) : Promise.resolve(null)).then(function (dataUrl) {
         var g = find(id), before = Object.assign({}, g);
-        ['title', 'brand', 'expiresOn', 'memo', 'reservedBy'].forEach(function (k) { if (k in patch) g[k] = patch[k]; });
+        ['title', 'brand', 'expiresOn', 'memo', 'reservedBy', 'isAmount', 'faceValue', 'balance'].forEach(function (k) { if (k in patch) g[k] = patch[k]; });
+        if (!g.isAmount) { g.faceValue = null; g.balance = null; }
         if (dataUrl) { g.imagePath = 'demo:' + g.id + ':' + Date.now(); db.images[g.id] = dataUrl; }
+        if (!g.used && L.autoUsed(before, g)) { g.used = true; g.usedBy = db.me; g.usedAt = new Date().toISOString(); }
         g.updatedAt = new Date().toISOString();
         log(before, g);
         save();
@@ -125,6 +133,20 @@
         g.used = !!used;
         g.usedBy = used ? db.me : null;
         g.usedAt = used ? new Date().toISOString() : null;
+        g.updatedAt = new Date().toISOString();
+        log(before, g);
+        save();
+        return Object.assign({}, g);
+      });
+    };
+    // 금액형 나눠 쓰기 — 잔액이 0 이 되면 사용함
+    this.spend = function (id, amount) {
+      return attempt(function () {
+        var g = find(id), before = Object.assign({}, g);
+        var r = L.spendResult(g, amount);
+        if (!r.ok) throw new Error(r.error);
+        g.balance = r.balance;
+        if (L.autoUsed(before, g)) { g.used = true; g.usedBy = db.me; g.usedAt = new Date().toISOString(); }
         g.updatedAt = new Date().toISOString();
         log(before, g);
         save();
@@ -173,7 +195,8 @@
     if (/Password should be/i.test(msg)) return new Error('비밀번호는 6자 이상이어야 합니다.');
     if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return new Error('Supabase 에 연결하지 못했습니다. 인터넷 연결과 「설정」의 주소를 확인해 주세요.');
     if (/relation .* does not exist|Could not find the table|schema cache/i.test(msg)) return new Error('DB 표가 없습니다. supabase/schema.sql 을 SQL Editor 에서 먼저 실행해 주세요.');
-    if (/초대 코드|이미 가족|로그인이 필요/.test(msg)) return new Error(msg);
+    if (/초대 코드|이미 가족|로그인이 필요|잔액|금액형|사용함/.test(msg)) return new Error(msg);
+    if (/is_amount|face_value|spend_giftcon/.test(msg)) return new Error('DB 가 옛 판입니다. supabase/schema.sql 을 SQL Editor 에서 다시 실행해 주세요(데이터는 그대로).');
     if (e && e.code === '42501' || /row-level security/i.test(msg)) return new Error('권한이 없습니다(같은 가족만 볼 수 있습니다).');
     return new Error(msg);
   }
@@ -253,7 +276,8 @@
     this.addGiftcon = function (v, blob) {
       return famId().then(function (fid) {
         return upload(fid, blob).then(function (path) {
-          var row = L.toRow({ title: v.title, brand: v.brand, expiresOn: v.expiresOn, memo: v.memo, reservedBy: v.reservedBy, imagePath: path });
+          var row = L.toRow({ title: v.title, brand: v.brand, expiresOn: v.expiresOn, memo: v.memo, reservedBy: v.reservedBy, imagePath: path,
+            isAmount: v.isAmount, faceValue: v.faceValue, balance: v.balance });
           row.family_id = fid;
           return sb.from('giftcons').insert(row).select().single().then(function (res) {
             if (res.error) { removeFile(path); throw niceError(res.error); }
@@ -279,6 +303,11 @@
     };
     this.setUsed = function (id, used) {
       return sb.from('giftcons').update({ used: !!used }).eq('id', id).select().single().then(unwrap).then(L.fromRow);
+    };
+    // 나눠 쓰기는 RPC 로 — 두 사람이 동시에 써도 DB 가 잔액을 한 번에 줄이고 모자라면 거절
+    this.spend = function (id, amount) {
+      var a = L.parseWon(amount);
+      return sb.rpc('spend_giftcon', { p_id: id, p_amount: a }).then(unwrap).then(L.fromRow);
     };
     this.setReserved = function (id, userId) {
       return sb.from('giftcons').update({ reserved_by: userId || null }).eq('id', id).select().single().then(unwrap).then(L.fromRow);
@@ -322,6 +351,7 @@
     },
     loadConn: loadConn, saveConn: saveConn, clearConn: clearConn,
     loadSettings: loadSettings, saveSettings: saveSettings,
+    loadOpenAIKey: loadOpenAIKey, saveOpenAIKey: saveOpenAIKey, clearOpenAIKey: clearOpenAIKey,
     storageOk: function () { get(KEY_SETTINGS); return storageOk; },
     // 연결 시험: 주소·키로 표가 있는지 확인(로그인 전이라 행은 0개가 정상)
     testConn: function (url, key) {

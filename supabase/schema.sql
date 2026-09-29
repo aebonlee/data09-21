@@ -14,8 +14,14 @@
 --  표 목록
 --    families        가족 (이름 · 초대 코드)
 --    family_members  가족 구성원 (표시 이름 · 만든 사람/구성원) — 한 사람은 한 가족에만
---    giftcons        기프티콘 (사진 경로 · 상품명 · 발행처 · 유효기간 · 메모 · 등록자 · 예약자 · 사용 여부)
---    giftcon_log     기록 — 등록 · 수정 · 사용 · 사용취소 · 예약 · 삭제 (덧붙이기만, 고치기·지우기 불가)
+--    giftcons        기프티콘 (사진 경로 · 상품명 · 발행처 · 유효기간 · 메모 · 등록자 · 예약자 · 사용 여부
+--                    · 금액형이면 액면가·잔액)
+--    giftcon_log     기록 — 등록 · 수정 · 사용 · 금액사용 · 사용취소 · 예약 · 삭제 (덧붙이기만, 고치기·지우기 불가)
+--
+--  판 기록
+--    2026-09-29 오후 늦게 — 금액형 상품권: giftcons.is_amount · face_value · balance, RPC spend_giftcon,
+--                          기록 「금액사용」. 잔액이 0 이 되는 순간 「사용함」(체크는 사람이 다시 풀 수 있음).
+--                          이미 1단계 스키마를 실행한 DB 에 이 파일을 다시 실행하면 칸만 더해집니다.
 --  Storage
 --    버킷 giftcons (비공개) — 파일 경로 「<가족 id>/<파일 이름>」, 같은 가족만 읽고 올리고 지움
 --
@@ -68,6 +74,9 @@ create table if not exists public.giftcons (
   used         boolean not null default false,                                 -- 「사용함」 — 사용자가 직접 표시
   used_by      uuid,                                                           -- 사용 표시한 사람 (트리거가 채움)
   used_at      timestamptz,                                                    -- 사용 표시 시각 (트리거가 채움)
+  is_amount    boolean not null default false,                                 -- 금액형 상품권(나눠 씀)
+  face_value   integer,                                                        -- 액면가(원) — 금액형만
+  balance      integer,                                                        -- 잔액(원) — 금액형만
   created_at   timestamptz not null default now(),
   updated_at   timestamptz not null default now(),
   -- 사진은 자기 가족 폴더에만
@@ -81,11 +90,22 @@ create table if not exists public.giftcons (
 );
 create index if not exists giftcons_family_expires_idx on public.giftcons (family_id, expires_on);
 
+-- 1단계 스키마를 이미 실행한 DB 에 금액형 칸을 더합니다 (새 DB 에서는 위 create 가 이미 만들었으므로 건너뜀)
+alter table public.giftcons add column if not exists is_amount  boolean not null default false;
+alter table public.giftcons add column if not exists face_value integer;
+alter table public.giftcons add column if not exists balance    integer;
+-- 금액형이면 액면가 1원~1천만 원, 잔액 0~액면가. 아니면 둘 다 비어 있음
+alter table public.giftcons drop constraint if exists giftcons_amount_consistent;
+alter table public.giftcons add constraint giftcons_amount_consistent check (
+  (not is_amount and face_value is null and balance is null)
+  or (is_amount and face_value is not null and balance is not null      -- NULL 이면 CHECK 가 통과해 버리므로 명시
+      and face_value between 1 and 10000000 and balance between 0 and face_value));
+
 create table if not exists public.giftcon_log (
   id          bigint generated always as identity primary key,
   family_id   uuid not null references public.families(id) on delete cascade,
   giftcon_id  uuid not null,              -- 기프티콘을 지워도 기록은 남도록 FK 를 두지 않음
-  action      text not null check (action in ('등록', '수정', '사용', '사용취소', '예약', '삭제')),
+  action      text not null,
   title       text not null,              -- 그때의 상품명
   detail      text,                       -- 예) '예약: 엄마' · '예약 해제' · '바뀐 칸: 유효기간'
   actor       uuid,                       -- 한 사람
@@ -93,6 +113,10 @@ create table if not exists public.giftcon_log (
   created_at  timestamptz not null default now()
 );
 create index if not exists giftcon_log_family_idx on public.giftcon_log (family_id, created_at desc);
+-- 기록 종류 (「금액사용」은 2026-09-29 오후 늦게 더함 — 옛 DB 의 자동 이름 제약을 바꿔 끼웁니다)
+alter table public.giftcon_log drop constraint if exists giftcon_log_action_check;
+alter table public.giftcon_log add constraint giftcon_log_action_check
+  check (action in ('등록', '수정', '사용', '금액사용', '사용취소', '예약', '삭제'));
 
 -- ----------------------------------------------------------------------------
 -- 2. 판정 함수 — security definer 인 이유
@@ -175,6 +199,13 @@ $fn$;
 create or replace function public.giftcons_before_write()
 returns trigger language plpgsql set search_path = public as $fn$
 begin
+  -- 금액형이 아니면 금액 칸을 비웁니다
+  if not new.is_amount then new.face_value := null; new.balance := null; end if;
+  -- 잔액이 0 이 「되는 순간」 사용함 (이미 0 인 채 사람이 체크를 풀면 그대로 둠) — js/logic.js autoUsed 와 같음
+  if new.is_amount and new.balance = 0 and not new.used
+     and (tg_op = 'INSERT' or not old.is_amount or old.balance is null or old.balance > 0) then
+    new.used := true;
+  end if;
   if tg_op = 'INSERT' then
     new.created_by := auth.uid();
     new.created_at := now();
@@ -201,6 +232,7 @@ declare
   v_name  text;
   v_res   text;
   v_diff  text[] := '{}';
+  v_spent boolean := false;
 begin
   select display_name into v_name from public.family_members
    where family_id = v_row.family_id and user_id = auth.uid();
@@ -223,6 +255,13 @@ begin
     if new.expires_on is distinct from old.expires_on then v_diff := array_append(v_diff, '유효기간'); end if;
     if new.memo is distinct from old.memo then v_diff := array_append(v_diff, '메모'); end if;
     if new.image_path is distinct from old.image_path then v_diff := array_append(v_diff, '사진'); end if;
+    if new.is_amount is distinct from old.is_amount then v_diff := array_append(v_diff, '금액형'); end if;
+    if new.face_value is distinct from old.face_value then v_diff := array_append(v_diff, '액면가'); end if;
+    -- 잔액: 줄면 「금액사용」, 늘면(바로잡기) 「수정」의 바뀐 칸
+    v_spent := old.is_amount and new.is_amount and new.balance < old.balance;
+    if not v_spent and new.is_amount = old.is_amount and new.balance is distinct from old.balance then
+      v_diff := array_append(v_diff, '잔액');
+    end if;
     if cardinality(v_diff) > 0 then
       insert into public.giftcon_log (family_id, giftcon_id, action, title, detail, actor, actor_name)
       values (new.family_id, new.id, '수정', new.title, '바뀐 칸: ' || array_to_string(v_diff, ', '), auth.uid(), v_name);
@@ -234,6 +273,12 @@ begin
       insert into public.giftcon_log (family_id, giftcon_id, action, title, detail, actor, actor_name)
       values (new.family_id, new.id, '예약', new.title,
               case when new.reserved_by is null then '예약 해제' else '예약: ' || coalesce(v_res, '?') end,
+              auth.uid(), v_name);
+    end if;
+    if v_spent then
+      insert into public.giftcon_log (family_id, giftcon_id, action, title, detail, actor, actor_name)
+      values (new.family_id, new.id, '금액사용', new.title,
+              to_char(old.balance - new.balance, 'FM999,999,999') || '원 사용 · 잔액 ' || to_char(new.balance, 'FM999,999,999') || '원',
               auth.uid(), v_name);
     end if;
     if new.used and not old.used then
@@ -263,6 +308,32 @@ create trigger giftcons_write_log after insert or update or delete on public.gif
   for each row execute function public.giftcons_write_log();
 
 -- ----------------------------------------------------------------------------
+-- 4-1. RPC — 금액형 나눠 쓰기
+--    두 가족이 같은 상품권을 동시에 써도 잔액을 한 번에 줄이고(행 잠금), 모자라면 거절합니다.
+--    security invoker — 호출한 사람의 RLS 가 그대로 걸리므로 다른 가족 것은 「찾지 못했습니다」.
+-- ----------------------------------------------------------------------------
+create or replace function public.spend_giftcon(p_id uuid, p_amount integer)
+returns public.giftcons language plpgsql security invoker set search_path = public as $fn$
+declare
+  g public.giftcons;
+begin
+  if auth.uid() is null then raise exception '로그인이 필요합니다' using errcode = '28000'; end if;
+  if p_amount is null or p_amount < 1 then
+    raise exception '쓴 금액은 1원 이상이어야 합니다' using errcode = '22023';
+  end if;
+  select * into g from public.giftcons where id = p_id for update;
+  if not found then raise exception '기프티콘을 찾지 못했습니다' using errcode = 'P0002'; end if;
+  if not g.is_amount then raise exception '금액형 상품권이 아닙니다' using errcode = '22023'; end if;
+  if g.used then raise exception '이미 사용함입니다. 체크를 풀고 다시 해 주세요' using errcode = '22023'; end if;
+  if p_amount > g.balance then
+    raise exception '잔액(%원)보다 많이 쓸 수 없습니다', to_char(g.balance, 'FM999,999,999') using errcode = '22023';
+  end if;
+  update public.giftcons set balance = balance - p_amount where id = p_id returning * into g;
+  return g;
+end;
+$fn$;
+
+-- ----------------------------------------------------------------------------
 -- 5. 함수 권한 — 두 겹을 모두 걷습니다
 --    ① PostgreSQL 이 함수를 만들 때 PUBLIC 에 EXECUTE 를 줍니다
 --    ② Supabase 가 기본 권한으로 anon·authenticated 에 EXECUTE 를 줍니다
@@ -274,12 +345,14 @@ revoke all on function public.create_family(text, text)          from public, an
 revoke all on function public.join_family(text, text)            from public, anon;
 revoke all on function public.giftcons_before_write()            from public, anon;
 revoke all on function public.giftcons_write_log()               from public, anon;
+revoke all on function public.spend_giftcon(uuid, integer)       from public, anon;
 grant execute on function public.is_family_member(uuid)          to authenticated;
 grant execute on function public.can_access_family_file(text)    to authenticated;
 grant execute on function public.create_family(text, text)       to authenticated;
 grant execute on function public.join_family(text, text)         to authenticated;
 grant execute on function public.giftcons_before_write()         to authenticated;
 grant execute on function public.giftcons_write_log()            to authenticated;
+grant execute on function public.spend_giftcon(uuid, integer)     to authenticated;
 
 -- 표시 이름만 고칠 수 있게: 구성원 표는 칸 단위로 UPDATE 를 엽니다(가족 옮기기·역할 바꾸기 차단)
 revoke update on public.family_members from anon, authenticated;

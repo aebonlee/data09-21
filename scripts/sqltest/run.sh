@@ -61,6 +61,42 @@ if [ -f "$ROOT/scripts/sqltest/20_project.local.sql" ]; then
   "${PSQL[@]}" -f "$ROOT/scripts/sqltest/20_project.local.sql" 2>&1 | sed 's/^psql:.*NOTICE:  //'
 fi
 
+# 이미 옛 판(1단계) 스키마로 쓰던 DB 에 새 판을 다시 실행해도 데이터가 남고 칸이 더해지는가
+OLD_REV="${OLD_SCHEMA_REV:-67783ad}"
+if git -C "$ROOT" cat-file -e "$OLD_REV:supabase/schema.sql" 2>/dev/null; then
+  echo "⑤-2 올림 검사 — $OLD_REV 판 스키마 위에 새 schema.sql 적용"
+  "$PGBIN/createdb" -h "$PGSOCK" -U postgres sqltest_up
+  UP=("$PGBIN/psql" -h "$PGSOCK" -U postgres -d sqltest_up -v ON_ERROR_STOP=1 -q)
+  "${UP[@]}" -f "$ROOT/scripts/sqltest/00_supabase_stub.local.sql" >/dev/null
+  git -C "$ROOT" show "$OLD_REV:supabase/schema.sql" | PGOPTIONS='-c client_min_messages=warning' "${UP[@]}"
+  "${UP[@]}" -c "insert into auth.users (id, email) values ('aaaaaaaa-0000-0000-0000-000000000001', 'a@example.com') on conflict do nothing"
+  "${UP[@]}" <<'SQL'
+set role authenticated;
+set request.jwt.claim.sub = 'aaaaaaaa-0000-0000-0000-000000000001';
+do $x$ begin perform public.create_family('옛 가족', '엄마'); end $x$;
+insert into public.giftcons (family_id, title, expires_on) select family_id, '옛 기프티콘', current_date from public.family_members;
+SQL
+  PGOPTIONS='-c client_min_messages=warning' "${UP[@]}" -f "$ROOT/supabase/schema.sql"
+  "${UP[@]}" <<'SQL' 2>&1 | sed 's/^.*NOTICE:  //'
+set role authenticated;
+set request.jwt.claim.sub = 'aaaaaaaa-0000-0000-0000-000000000001';
+do $t$
+declare g public.giftcons;
+begin
+  select * into g from public.giftcons where title = '옛 기프티콘';
+  if g.id is null or g.is_amount or g.face_value is not null then raise exception 'FAIL  옛 기프티콘이 남고 금액형 아님으로 채워져야 한다'; end if;
+  raise notice '  OK   옛 판 DB 에 다시 실행 — 기존 기프티콘은 그대로, is_amount = false';
+  insert into public.giftcons (family_id, title, expires_on, is_amount, face_value, balance)
+  values (g.family_id, '새 상품권', current_date, true, 5000, 5000) returning * into g;
+  g := public.spend_giftcon(g.id, 1000);
+  if g.balance <> 4000 or not exists (select 1 from public.giftcon_log where action = '금액사용') then
+    raise exception 'FAIL  올린 DB 에서 금액사용 기록이 되어야 한다';
+  end if;
+  raise notice '  OK   올린 DB 에서 나눠 쓰기·「금액사용」 기록(바뀐 action CHECK) 동작';
+end $t$;
+SQL
+fi
+
 echo "⑥ 운영 가드 자가검사 (운영 흔적이 보이면 검증 파일이 스스로 멈추는가)"
 guard_check() {
   local label="$1" setup="$2" teardown="$3" f

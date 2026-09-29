@@ -13,11 +13,11 @@
     { userId: 'm-kid1', displayName: '첫째', role: 'member' },
     { userId: 'm-kid2', displayName: '둘째', role: 'member' }
   ];
-  // [상품명, 발행처, 남은 날, 예약자, 사용(며칠 전, 누가), 메모, 색]
+  // [상품명, 발행처, 남은 날, 예약자, 사용(며칠 전, 누가), 메모, 색, 금액형(액면가, 잔액, 쓴 사람)]
   var ITEMS = [
     ['아메리카노 Tall 2잔', '카페 A', 1, 'm-kid1', null, '', '#2e6b4f'],
     ['치킨 한 마리 세트', '치킨 B', 3, null, null, '금요일 저녁에 쓰기로', '#b5541c'],
-    ['모바일 상품권 1만원', '편의점 C', 6, null, null, '금액형 — 쓰고 남은 금액을 메모에 적어 두세요', '#3b5ba5'],
+    ['모바일 상품권 1만원', '편의점 C', 6, null, null, '', '#3b5ba5', [10000, 6500, 'm-kid2']],
     ['생일 케이크 교환권', '베이커리 D', 20, 'm-mom', null, '할머니 생신용', '#9b3d6b'],
     ['아이스크림 파인트', '아이스크림 E', 45, null, null, '', '#c2477a'],
     ['버블티 L', '카페 F', 0, null, null, '', '#6b4a2e'],
@@ -71,6 +71,7 @@
       var g = {
         id: id, familyId: 'demo-family', title: it[0], brand: it[1], expiresOn: exp, memo: it[5],
         imagePath: 'demo:' + id, createdBy: MEMBERS[i % 4].userId, reservedBy: it[3],
+        isAmount: !!it[7], faceValue: it[7] ? it[7][0] : null, balance: it[7] ? it[7][0] : null,
         used: !!it[4], usedBy: it[4] ? it[4][1] : null, usedAt: it[4] ? isoDaysAgo(today, it[4][0], 19) : null,
         createdAt: isoDaysAgo(today, addedDaysAgo, 9), updatedAt: isoDaysAgo(today, addedDaysAgo, 9)
       };
@@ -80,6 +81,13 @@
       L.logEntriesFor(null, Object.assign({}, g, { used: false }), name).forEach(function (e) {
         db.log.push(Object.assign(e, { id: ++db.seq, actor: by.userId, actorName: by.displayName, createdAt: g.createdAt }));
       });
+      if (it[7]) {  // 금액형: 한 번 나눠 씀 → 「금액사용」 기록
+        var spentBy = it[7][2], before = Object.assign({}, g);
+        g.balance = it[7][1];
+        L.logEntriesFor(before, g, name).forEach(function (e) {
+          db.log.push(Object.assign(e, { id: ++db.seq, actor: spentBy, actorName: name(spentBy), createdAt: isoDaysAgo(today, 1, 18) }));
+        });
+      }
       if (g.used) {
         db.log.push({ id: ++db.seq, action: '사용', giftconId: id, title: g.title, detail: null,
           actor: g.usedBy, actorName: name(g.usedBy), createdAt: g.usedAt });
