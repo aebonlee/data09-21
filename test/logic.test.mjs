@@ -389,6 +389,54 @@ test('읽은 것이 없으면 실패 · 보여 줄 때 긴 숫자(10자리 이�
   assert.equal(L.maskLongDigits('사용기한 ~ 2026-10-05'), '사용기한 ~ 2026-10-05');
 });
 
+console.log('무료 글자 읽기 — 실제 캡처 2장으로 보강 (2026-09-30)');
+// 수강생 실제 기프티콘 캡처를 Tesseract.js 로 읽은 줄(글자·높이·확신도). 사진 자체는 저장소에 넣지 않았습니다.
+// 두 사진의 배치를 흉내 낸 예시 그림은 test/ocr-samples/8_voucher_wrap.jpg · 9_highlight_brand.jpg
+const ln = (arr) => ({ text: '', lines: arr.map(([text, h, conf]) => ({ text, h, conf })) });
+const REAL_VOUCHER = ln([['LIT', 35, 19], ['emart', 25, 88], ['이마트/트레이더스 5만원', 23, 93], ['8.          A', 20, 48],
+  ['50,000       수랭금액. 1개', 20, 75], ['사용기한 _. ~2024.02.23', 16, 71], ['사용처      이마트', 18, 94], ['® gifticon', 16, 38],
+  ['기프티콘 Aoj= 공짜 무료티콘이 많다던데..', 18, 84]]);
+const REAL_COFFEE = ln([['12:15', 47, 52], ['<                            쿠폰함                           X', 53, 89], ['더블 따아 세트', 64, 87],
+  ['유효기간 : 2026.09.16 ~ 2026.09.30', 43, 92], ['ㅇㅇ', 23, 62], ['INnUNMber', 52, 2], ['= 상품은 무상제공되어', 35, 91],
+  ['유효기간 연장 및 EHEO| 불가합니다.', 34, 88], ['I]                  O                   <', 57, 71]]);
+// 같은 사진을 「색 배경 지운 그림」으로 두 번째 읽은 결과 — 파란 밑줄 깔린 브랜드 줄이 비로소 (틀린 글자로) 읽힘
+const REAL_COFFEE_ALT = ln([['<                           쿠폰함                          X', 53, 89], ['~ _', 69, 64],
+  ['.메가\\(9ㄷ커피,', 64, 66], ['더블 Wot 세트', 63, 89], ['유효기간 : 2026.09.16 ~ 2026.09.30', 43, 92]]);
+test('실제 금액권 캡처: 로고 「emart」는 상품명이 아님, 줄 끝 「5만원」 = 금액 + 줄바꿈된 「권」, 지난 날짜 경고', () => {
+  const r = L.parseOcrText(REAL_VOUCHER, TODAY);
+  assert.deepEqual(r.value, { title: '이마트/트레이더스 5만원권', brand: '이마트', expiresOn: '2024-02-23', amount: 50000 });
+  assert.ok(r.warnings.some((w) => w.includes('이미 지났습니다')));
+});
+test('실제 교환권 캡처: 첫 읽기엔 발행처가 없고, 두 번째 읽기(alt)의 흐린 브랜드 글자를 목록으로 바로잡음', () => {
+  const r1 = L.parseOcrText(REAL_COFFEE, TODAY);
+  assert.deepEqual(r1.value, { title: '더블 따아 세트', brand: '', expiresOn: '2026-09-30', amount: null });
+  const r2 = L.parseOcrText(Object.assign({ alt: REAL_COFFEE_ALT }, REAL_COFFEE), TODAY);
+  assert.deepEqual(r2.value, { title: '더블 따아 세트', brand: '메가MGC커피', expiresOn: '2026-09-30', amount: null });
+  assert.ok(r2.warnings.some((w) => w.includes('브랜드 이름으로')));
+  assert.ok(!r2.warnings.some((w) => w.includes('이미 지났습니다')));   // 오늘(9/29) 기준 아직 유효
+});
+test('브랜드 목록: OCR 이 틀리게 읽은 모양도 바른 이름으로, 로고뿐인 줄 표시, 모르는 이름은 null', () => {
+  assert.equal(L.brandIn('.메가\\(9ㄷ커피,').name, '메가MGC커피');
+  assert.equal(L.brandIn('메기1ㄴ커피').name, '메가MGC커피');
+  assert.equal(L.brandIn('메가박스 관람권').name, '메가박스');
+  assert.equal(L.brandIn('이마트24 모바일').name, '이마트24');
+  assert.deepEqual(L.brandIn('emart'), { name: '이마트', whole: true });
+  assert.equal(L.brandIn('스타벅스 아메리카노 T').whole, false);
+  assert.equal(L.brandIn('하늘카페'), null);
+  assert.equal(L.brandIn('summary'), null);   // 낱말 안의 「mart」 같은 조각은 브랜드가 아님
+});
+test('라벨 있는 발행처가 목록보다 먼저, 상품명 줄 속 브랜드는 발행처로', () => {
+  assert.equal(L.parseOcrText('사용처 : 우리동네 스타벅스점\n아메리카노\n유효기간 2026.12.01', TODAY).value.brand, '우리동네 스타벅스점');
+  const r = L.parseOcrText('스타벅스 카페 라떼 T\n유효기간 2026.12.01', TODAY);
+  assert.deepEqual([r.value.title, r.value.brand], ['스타벅스 카페 라떼 T', '스타벅스']);
+});
+test('금액: 줄 끝 「3만원」은 금액, 줄 가운데 「3만원」·그냥 가격은 금액 아님', () => {
+  assert.equal(L.parseOcrText('별빛마트/달빛마켓 3만원\n사용기한 ~ 2026.12.23', TODAY).value.amount, 30000);
+  assert.equal(L.parseOcrText('별빛마트/달빛마켓 3만원\n사용기한 ~ 2026.12.23', TODAY).value.title, '별빛마트/달빛마켓 3만원권');
+  assert.equal(L.parseOcrText('치킨 3만원 세트\n유효기간 2026.12.01', TODAY).value.amount, null);
+  assert.equal(L.parseOcrText('아메리카노 4,500원\n유효기간 2026.12.01', TODAY).value.amount, null);
+});
+
 console.log('가족에게 보내기 (휴대폰 공유 창 · 문자 앱)');
 test('전화번호 정리: 하이픈·빈칸·+82 → 010…, 이상한 값은 null', () => {
   assert.equal(L.normPhone('010-1234-5678'), '01012345678');

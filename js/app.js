@@ -151,7 +151,7 @@
         alerts.length > 5 ? h('p', { class: 'muted' }, '외 ' + (alerts.length - 5) + '건') : null,
         h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn small primary send-all',
           onclick: function () { openSend(alerts.map(function (a) { return a.g; })); } }, '오늘의 알림 모두 가족에게 보내기')),
-        h('p', { class: 'hint' }, '가족 누구나 보관함을 열면 이 알림을 봅니다. 알림 시점: ' + L.alertDaysText(settings.alertDays) + ' — 「설정」에서 바꿉니다. 「가족에게 보내기」는 휴대폰의 카카오톡·문자로 무료로 보내지만, 보내기 버튼은 직접 눌러야 합니다(자동 발송은 2단계).'));
+        h('p', { class: 'hint' }, '가족 누구나 보관함을 열면 이 알림을 봅니다. 알림 시점: ' + L.alertDaysText(settings.alertDays) + ' — 「설정」에서 바꿉니다. 「가족에게 보내기」는 휴대폰의 카카오톡·문자로 무료로 보내지만, 보내기 버튼은 직접 눌러야 합니다.'));
     }
 
     var list = L.filterList(items, tab, today);
@@ -257,7 +257,7 @@
       else { box.select(); try { document.execCommand('copy'); ok(); } catch (e) { /* 직접 복사 */ } }
     } }, '글 복사');
     add(c, [
-      h('p', { class: 'hint' }, '휴대폰에 있는 카카오톡·문자로 보내므로 추가 비용이 없습니다. 다만 받는 사람을 고르고 「보내기」를 누르는 것은 직접 해야 합니다(정해진 시각에 저절로 보내는 것은 유료 발송 서비스와 서버가 필요한 2단계).'),
+      h('p', { class: 'hint' }, '휴대폰에 있는 카카오톡·문자로 보내므로 추가 비용이 없습니다. 다만 받는 사람을 고르고 「보내기」를 누르는 것은 직접 해야 합니다.'),
       box,
       h('div', { class: 'row send-row' }, shareBtn, sms, copyBtn),
       h('p', { class: 'hint' }, (canShare ? '「카카오톡 등으로 공유」를 누르면 휴대폰 공유 창이 열립니다. 카카오톡 → 가족 대화방을 고르세요. ' : '이 브라우저에는 공유 창이 없습니다(PC 등). 「글 복사」 뒤 붙여 넣어 주세요. ') +
@@ -371,7 +371,14 @@
       ocrBtn.disabled = true;
       var line = h('p', { class: 'hint' }, '준비 중…');
       ocrMsg.appendChild(line);
-      window.GCOCR.readText(img, function (t) { line.textContent = t; }).then(function (res) {
+      var prog = function (t) { line.textContent = t; };
+      window.GCOCR.readText(img, prog).then(function (res) {
+        // 발행처를 못 찾았으면 색 배경·형광 밑줄을 지운 그림으로 한 번 더 읽습니다(브랜드 이름 찾기에만 씀)
+        var r0 = L.parseOcrText(res, today);
+        if (!r0.ok || r0.value.brand) return res;
+        return window.GCOCR.readText(img, function (t) { prog('발행처 다시 읽는 중 · ' + t); }, { bright: true })
+          .then(function (alt) { res.alt = alt; return res; }, function () { return res; });
+      }).then(function (res) {
         ocrRaw.hidden = false;
         ocrRaw.querySelector('pre').textContent = L.maskLongDigits(res.text);
         var r = L.parseOcrText(res, today);
@@ -539,7 +546,7 @@
     var custom = h('input', { name: 'alertCustom', placeholder: '예) 10, 5', value: settings.alertDays.filter(function (d) { return L.ALERT_CHOICES.indexOf(d) < 0; }).join(', ') });
     var alertForm = h('form', { class: 'panel' },
       h('h2', null, '알림 시점'),
-      h('p', { class: 'hint' }, '사용하지 않은 기프티콘의 유효기간이 이 날짜 안으로 들어오면 보관함 맨 위에 가족 알림으로 보여 줍니다. 기본값은 D-7 · D-2 · D-1 입니다. 이 설정은 이 기기에만 저장됩니다(가족 전체에게 카카오톡·문자로 보내는 것은 2단계).'),
+      h('p', { class: 'hint' }, '사용하지 않은 기프티콘의 유효기간이 이 날짜 안으로 들어오면 보관함 맨 위에 가족 알림으로 보여 줍니다. 기본값은 D-7 · D-2 · D-1 입니다. 이 설정은 이 기기에만 저장됩니다. 가족에게 알리려면 알림 띠의 「가족에게 보내기」를 눌러 주세요.'),
       h('div', { class: 'checks' }, checks),
       field('직접 넣기 (며칠 전, 쉼표로)', custom),
       h('div', { class: 'row' },

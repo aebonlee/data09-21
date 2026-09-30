@@ -49,10 +49,29 @@
     return workerP;
   }
 
+  // 두 번째 읽기용 그림 — 점마다 R·G·B 중 가장 밝은 값으로 회색을 만듭니다(2026-09-30).
+  // 검은·회색 글씨는 그대로 어둡고, 파랑·분홍 같은 색 배경·형광 밑줄은 밝아져 지워집니다.
+  // 실제 캡처에서 파란 밑줄이 깔린 브랜드 줄(「메가MGC커피」)을 첫 읽기가 통째로 놓쳐 넣었습니다.
+  function brightCanvas(image) {
+    var mk = root.createImageBitmap ? root.createImageBitmap(image) : Promise.reject(new Error('이 브라우저는 그림 바꾸기를 못 합니다.'));
+    return mk.then(function (bmp) {
+      var c = document.createElement('canvas');
+      c.width = bmp.width; c.height = bmp.height;
+      var x = c.getContext('2d');
+      x.drawImage(bmp, 0, 0);
+      var id = x.getImageData(0, 0, c.width, c.height), d = id.data;
+      for (var i = 0; i < d.length; i += 4) { var g = Math.max(d[i], d[i + 1], d[i + 2]); d[i] = d[i + 1] = d[i + 2] = g; }
+      x.putImageData(id, 0, 0);
+      return c;
+    });
+  }
+
   // image: File·Blob·canvas → Promise({ text, lines }) — 읽은 글자와 줄마다 높이·확신도
   // progress(글자): 「엔진 받는 중 37%」 같은 진행 안내
-  function readText(image, progress) {
+  // opts.bright: 색 배경을 지운 그림으로 읽기(발행처를 못 찾았을 때 두 번째로)
+  function readText(image, progress, opts) {
     if (!image) return Promise.reject(new Error('먼저 사진을 골라 주세요.'));
+    if (opts && opts.bright) return brightCanvas(image).then(function (c) { return readText(c, progress); });
     onProgress = function (m) {
       if (!progress || !m) return;
       var pct = typeof m.progress === 'number' ? ' ' + Math.round(m.progress * 100) + '%' : '';

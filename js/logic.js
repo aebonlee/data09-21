@@ -417,9 +417,54 @@
   // 숫자가 10자리 이상 이어진 줄·「바코드/쿠폰번호/주문번호」 줄은 통째로 버리고 어디에도 두지 않습니다.
   var OCR_SKIP = /바코드|쿠폰\s*번호|주문\s*번호|교환\s*번호|인증\s*번호|PIN|핀\s*번호/i;
   var OCR_EXP_KEY = /유효\s*기[간한]|사용\s*기[간한]|만료|까지|교환\s*기[간한]/;
-  var OCR_GENERIC = /^(기프티콘|모바일\s*(교환권|상품권)|교환권|상품권|선물하기|카카오톡\s*선물하기|선물|쿠폰|gift\s*card|coupon|e-?쿠폰)$/i;
+  var OCR_GENERIC = /^[^가-힣A-Za-z0-9]*(기프티콘|gifticon|기프티쇼|giftishow|모바일\s*(교환권|상품권)|교환권|상품권|선물하기|카카오톡\s*선물하기|선물|쿠폰|gift\s*card|coupon|e-?쿠폰)[^가-힣A-Za-z0-9]*$/i;
   var OCR_HEADER = /선물함|선물하기|쿠폰함|기프티콘함|받은\s*선물|보관함/;   // 앱 머리글 줄 — 상품명 후보에서 뺌
   var OCR_LABEL = /^(상품명|상품|메뉴|교환처|사용처|브랜드|발행처|매장|유효\s*기[간한]|사용\s*기[간한]|금액)\s*[:：]?\s*/;
+  // 자주 쓰는 브랜드 — 사진 속 로고·장식 글씨는 OCR 이 한두 글자씩 틀리게 읽습니다(실제 캡처: 「메가MGC커피」 → 「메가\(9ㄷ커피」·「메기1ㄴ커피」).
+  // 「사용처·교환처」 라벨이 없을 때 이 목록과 맞으면 바른 이름으로 발행처를 채웁니다. 없는 브랜드는 종전 규칙(상품명 위 줄)으로.
+  // (2026-09-30 수강생 실제 캡처 2장으로 보강)
+  var BRANDS = [
+    ['메가MGC커피', /메[가기]\s*[^\s가-힣]{0,5}\s*[ㄱ-ㅎ]?\s*커\s*피|MGC\s*커피|mega\s*(mgc\s*)?coffee/i],
+    ['메가박스', /메가박스|megabox/i],
+    ['스타벅스', /스타벅스|starbucks/i],
+    ['투썸플레이스', /투썸|twosome/i],
+    ['이디야커피', /이디야|ediya/i],
+    ['빽다방', /빽다방|paik'?s\s*coffee/i],
+    ['컴포즈커피', /컴포즈|compose\s*coffee/i],
+    ['할리스', /할리스|hollys/i],
+    ['폴바셋', /폴\s*바셋|paul\s*bassett/i],
+    ['공차', /공차|gong\s*cha/i],
+    ['배스킨라빈스', /배스킨|baskin/i],
+    ['던킨', /던킨|dunkin/i],
+    ['파리바게뜨', /파리바게[뜨트]|paris\s*baguette/i],
+    ['뚜레쥬르', /뚜레쥬르|tous\s*les\s*jours/i],
+    ['설빙', /설빙|sulbing/i],
+    ['교촌치킨', /교촌/],
+    ['BBQ', /\bBBQ\b|비비큐/i],
+    ['bhc', /\bbhc\b/i],
+    ['굽네치킨', /굽네/],
+    ['도미노피자', /도미노|domino/i],
+    ['버거킹', /버거킹|burger\s*king/i],
+    ['맥도날드', /맥도날드|mcdonald/i],
+    ['롯데리아', /롯데리아|lotteria/i],
+    ['GS25', /GS\s*25/i],
+    ['세븐일레븐', /세븐일레븐|7-?eleven/i],
+    ['이마트24', /이마트\s*24|emart\s*24/i],
+    ['이마트', /이마트|\be-?mart\b/i],
+    ['홈플러스', /홈플러스|homeplus/i],
+    ['롯데마트', /롯데마트|lotte\s*mart/i],
+    ['올리브영', /올리브영|olive\s*young/i],
+    ['다이소', /다이소|daiso/i],
+    ['CGV', /\bCGV\b/]
+  ];
+  // 줄에서 처음 맞는 브랜드 → { name, whole(줄 전체가 브랜드 이름뿐인지) } 또는 null
+  function brandIn(line) {
+    for (var i = 0; i < BRANDS.length; i++) {
+      var m = line.match(BRANDS[i][1]);
+      if (m) return { name: BRANDS[i][0], whole: line.replace(m[0], '').replace(/[^가-힣A-Za-z0-9]/g, '') === '' };
+    }
+    return null;
+  }
   function digitRun(s) { var m = s.replace(/[\s\-]/g, '').match(/\d{10,}/); return !!m; }
   // 사람에게 보여 줄 때도 긴 숫자는 가립니다(바코드 번호가 섞여 읽혔을 때)
   // (숫자 10자리 이상이 빈칸·하이픈으로만 이어진 덩어리. 줄은 넘지 않음 — 날짜 2026-10-05 는 8자리라 그대로)
@@ -465,6 +510,15 @@
     var lines = rows.map(function (r) { return r.text; });
     var warnings = [];
     var v = { title: '', brand: '', expiresOn: null, amount: null };
+    // 브랜드 목록으로 발행처 찾기 — 읽은 줄 전부(흐린 줄 포함), 없으면 두 번째 읽기(input.alt: 색 배경·형광 밑줄을 지운 그림)
+    function brandFromList() {
+      var alt = input && typeof input === 'object' && input.alt ? ocrInput(input.alt) : [];
+      var pools = [rows, alt];
+      for (var p = 0; p < pools.length; p++) for (var i = 0; i < pools[p].length; i++) {
+        var b = brandIn(pools[p][i].text);
+        if (b) { v.brand = b.name; warnings.push('발행처를 사진 속 브랜드 이름으로 넣었습니다(「' + b.name + '」). 확인해 주세요.'); return; }
+      }
+    }
     function labeled(re) {
       for (var i = 0; i < lines.length; i++) { var m = lines[i].match(re); if (m && str(m[2])) return str(m[2]); }
       return '';
@@ -488,9 +542,12 @@
       warnings.push('「유효기간」 글자를 못 찾아 사진 속 가장 늦은 날짜(' + v.expiresOn + ')를 넣었습니다. 꼭 확인해 주세요.');
     } else warnings.push('유효기간을 읽지 못했습니다. 직접 넣어 주세요.');
 
-    // 금액형: 「10,000원권」 · 「1만원권」 · 「금액권 10,000원」
+    if (v.expiresOn && daysLeft(v.expiresOn, today) < 0) warnings.push('유효기간(' + v.expiresOn + ')이 이미 지났습니다. 사진의 날짜와 맞는지 확인해 주세요.');
+
+    // 금액형: 「10,000원권」 · 「1만원권」 · 「금액권 10,000원」 · 줄 끝의 「5만원」(긴 상품명이 「5만원 / 권」으로 줄바꿈된 캡처)
     var joined = lines.join('\n');
     var am = joined.match(/(\d{1,3}(?:,\d{3})+|\d+)\s*원\s*(권|상품권|금액권)/) || joined.match(/(\d+\s*만\s*(?:\d\s*천\s*)?)원\s*(권|상품권|금액권)/) ||
+      joined.match(/[가-힣A-Za-z].*?(\d+\s*만)\s*원\s*$/m) ||
       (/금액권|상품권/.test(joined) ? joined.match(/(\d{1,3}(?:,\d{3})+|\d+\s*만)\s*원/) : null);
     if (am) {
       var n = parseWon(am[1].replace(/\s/g, '') + (/만|천/.test(am[1]) ? '원' : ''));
@@ -500,7 +557,7 @@
     // 상품명 라벨이 없으면: 라벨·날짜·앱 머리글·일반 낱말·흐리게 읽힌 줄을 빼고,
     // 줄 높이를 알면 글자가 가장 큰 줄(보통 상품명이 가장 큼), 모르면 글자가 가장 많은 앞쪽 줄
     if (!v.title) {
-      var best = null;
+      var best = null, cands = [];
       rows.slice(0, 12).forEach(function (r, i) {
         var ln = r.text;
         if (OCR_LABEL.test(ln) || OCR_EXP_KEY.test(ln) || OCR_GENERIC.test(ln) || OCR_HEADER.test(ln) || datesIn(ln, today).length) return;
@@ -509,10 +566,19 @@
         var letters = (ln.match(/[가-힣A-Za-z]/g) || []).length;
         if (letters < 2 || ln.length > 40) return;
         if (/^[\d,\s]+(만\s*)?원\s*(권|상품권|금액권)?$/.test(ln) || /^\d+\s*만\s*원\s*(권|상품권|금액권)?$/.test(ln)) return;  // 「10,000원권」만 있는 줄은 금액
+        var bi = brandIn(ln);
+        if (bi && bi.whole) return;   // 「emart」처럼 브랜드 로고뿐인 줄은 상품명이 아님
         var score = r.h ? r.h * 100 - i : letters - i * 0.5;   // 같으면 위쪽 줄
-        if (!best || score > best.score) best = { ln: ln, score: score, i: i };
+        cands.push({ ln: ln, score: score, i: i, kor: /[가-힣]/.test(ln) });
       });
-      // 발행처 라벨이 없으면: 상품명 바로 위의 짧은 줄(선물 화면은 보통 브랜드 → 상품명 순)
+      // 한글 줄이 있으면 빈칸 없는 영문 한 낱말 줄(로고 글씨)은 뺍니다
+      var anyKor = cands.some(function (c) { return c.kor; });
+      cands.forEach(function (c) {
+        if (anyKor && !c.kor && !/\s/.test(c.ln)) return;
+        if (!best || c.score > best.score) best = c;
+      });
+      // 발행처 라벨이 없으면: 먼저 브랜드 목록, 다음은 상품명 바로 위의 짧은 줄(선물 화면은 보통 브랜드 → 상품명 순)
+      if (!v.brand) brandFromList();
       if (best && !v.brand && best.i > 0) {
         var up = rows[best.i - 1].text;
         if (up.length <= 20 && /[가-힣A-Za-z]{2}/.test(up) && !OCR_HEADER.test(up) && !OCR_LABEL.test(up) && !OCR_GENERIC.test(up) && !datesIn(up, today).length && rows[best.i - 1].conf >= 60) {
@@ -520,9 +586,12 @@
           warnings.push('발행처를 추측해 넣었습니다(「' + v.brand + '」). 확인해 주세요.');
         }
       }
+      // 「이마트/트레이더스 5만원」 + 다음 줄 「권」이 못 읽힌 캡처: 금액을 읽었으면 「권」을 붙입니다
+      if (best && v.amount && /(\d+\s*만|\d{1,3}(,\d{3})+)\s*원$/.test(best.ln)) best.ln += '권';
       if (best) { v.title = best.ln.slice(0, 100); warnings.push('상품명을 추측해 넣었습니다(「' + v.title + '」). 사진과 맞는지 확인해 주세요.'); }
       else warnings.push('상품명을 읽지 못했습니다. 직접 적어 주세요.');
     }
+    if (!v.brand) brandFromList();
     if (!v.title && !v.brand && !v.expiresOn && v.amount == null) {
       return { ok: false, errors: ['사진에서 읽은 글자가 거의 없습니다. 기프티콘 부분만 잘라 더 선명한 캡처로 다시 해 주세요.'], warnings: warnings, value: null };
     }
@@ -580,7 +649,7 @@
     resolveAlertDays: resolveAlertDays, alertDaysText: alertDaysText,
     parseWon: parseWon, won: won, balanceText: balanceText, spendResult: spendResult, autoUsed: autoUsed,
     READ_PROMPT: READ_PROMPT, parseReadAnswer: parseReadAnswer, validateOpenAIKey: validateOpenAIKey,
-    parseOcrText: parseOcrText, maskLongDigits: maskLongDigits,
+    parseOcrText: parseOcrText, maskLongDigits: maskLongDigits, brandIn: brandIn,
     normPhone: normPhone, shareText: shareText, smsHref: smsHref, detectPlatform: detectPlatform,
     STATUS_LABEL: STATUS_LABEL, TABS: TABS, ACTIONS: ACTIONS, IMAGE_MAX_SIDE: IMAGE_MAX_SIDE,
     todayStr: todayStr, isDate: isDate, normDate: normDate, daysLeft: daysLeft, addDays: addDays, shortDate: shortDate,
